@@ -94,7 +94,22 @@ Controls:
 - `Share`: export a 48 kHz stereo Master WAV, MIDI, aligned 16-pad stems, or a portable Project Bundle containing the project and its used samples.
 - `Export MIDI`: write a Standard MIDI file using General MIDI drum notes.
 - `L`: record. `O`: overdub. `C`: capture. `U`: undo. `Y`: redo. `Q`: quantize.
-- `Esc`: quit.
+- `Esc`: closes the open panel; with nothing open it quits.
+
+Feedback the panel gives you:
+
+- The dot on the device chip shows MIDI activity. It flashes amber on every
+  message, sits teal between them, and turns red with `No MIDI data on this
+  port - switch Device` when an endpoint has been open for four seconds without
+  sending anything. CoreMIDI splits one USB device into several endpoints and
+  only one of them carries pad hits, so a silent port otherwise looks identical
+  to a working one.
+- Sampling controls grey out when no audio input is connected, and the tooltip
+  says why rather than letting you press a button that cannot work.
+- Every control with a keyboard shortcut names it in its tooltip.
+- Status messages appear at the bottom right, failures in red.
+- Launching a second copy prints `STARRYPAD is already running` instead of
+  exiting without a word.
 
 ## Design
 

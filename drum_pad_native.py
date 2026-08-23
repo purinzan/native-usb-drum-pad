@@ -55,6 +55,7 @@ DIAGNOSTIC_WINDOW = 256
 MIDI_HEALTH_CHECK_SECONDS = 2.0
 PERFORMANCE_BUFFER_SECONDS = 120.0
 PERFORMANCE_PHRASE_GAP_SECONDS = 2.0
+MIDI_SILENCE_HINT_SECONDS = 4.0
 AUDIO_HEALTH_CHECK_SECONDS = 2.0
 AUDIO_MODES = ("Low latency", "Stable")
 AUDIO_RATES = (48000, 44100)
@@ -1142,6 +1143,9 @@ class DrumPadNative:
         self.screen = None
         self.clock = None
         self.grain = None
+        self.audio_inputs_available = False
+        self.last_midi_event_ns = 0
+        self.midi_opened_at = 0.0
         self.faces = {}
         self.font = None
         self.small_font = None
@@ -2408,6 +2412,7 @@ class DrumPadNative:
         self.set_window_icon()
         self.grain = self.build_grain()
         self.clock = pygame.time.Clock()
+        self.audio_inputs_available = bool(audio_input_devices())
         self.faces = typeface.build()
         self.font = self.faces["ui"]
         self.small_font = self.faces["small"]
@@ -2542,6 +2547,8 @@ class DrumPadNative:
         if now < self.next_audio_health_check_at or self.audio_recovering:
             return
         self.next_audio_health_check_at = now + AUDIO_HEALTH_CHECK_SECONDS
+        # Sampling controls are only offered when something can actually record.
+        self.audio_inputs_available = bool(audio_input_devices())
         configured_missing = (
             self.audio_output_name is not None
             and self.audio_output_name not in self.audio_output_devices()
@@ -3244,6 +3251,8 @@ class DrumPadNative:
         try:
             self.midi_input = MidiInput(device_id, self.audio_events)
             self.midi_device_id = device_id
+            self.midi_opened_at = time.perf_counter()
+            self.last_midi_event_ns = 0
             self.midi_device_name = dict(MidiInput.devices()).get(device_id, f"Input {device_id}")
             self.preferred_midi_name = self.midi_device_name
             self.midi_disconnect_notified = False
@@ -5646,6 +5655,9 @@ class DrumPadNative:
             self.persist_settings()
 
     def handle_midi_trigger(self, kind, number, velocity, received_ns=None):
+        # Recorded before any mapping decision: this asks whether the port is
+        # alive, not whether the message landed on a pad.
+        self.last_midi_event_ns = received_ns or time.perf_counter_ns()
         if kind == "CC" and number == 4 and MAPPING_MODES[self.mapping_mode] == "GM Drums":
             self.hat_openness = max(0.0, min(1.0, velocity / 127.0))
             return
@@ -6061,7 +6073,24 @@ class DrumPadNative:
             "sequence_page_prev": "Previous bar", "sequence_page_next": "Next bar",
             "sequence_nudge_left": "Move hit earlier", "sequence_nudge_right": "Move hit later",
             "mixer_close": "Close mixer", "perform_fx_close": "Close effects",
+            # The shortcuts were documented only in the README until now.
+            "loop_record": "Record loop  (L)", "loop_play": "Play or stop loop  (Space)",
+            "loop_overdub": "Overdub  (O)", "loop_capture": "Capture last performance  (C)",
+            "loop_undo": "Undo  (U)", "loop_redo": "Redo  (Y)",
+            "loop_quantize": "Feel and quantize  (Q)", "loop_clear": "Clear the loop",
+            "loop_bars": "Loop length", "repeat": "Note repeat  (N)",
+            "repeat_rate": "Repeat subdivision", "metro": "Metronome  (M)",
+            "tap": "Tap tempo", "kit": "Switch kit", "settings": "Settings",
+            "project": "Projects: new, open, save as", "browser": "Browse sounds",
+            "mixer": "Pad mixer", "perform_fx": "Perform FX", "share": "Share and export",
+            "sample_edit": "Edit the sample", "sample_clear": "Back to the kit sound",
+            "view_perform": "Play the pads", "view_sequence": "Step sequencer",
+            "reconnect": "Reconnect MIDI and audio",
         }
+        if not self.audio_inputs_available:
+            labels["sample"] = "No audio input connected"
+        else:
+            labels["sample"] = "Record a sample  (S)"
         collections_to_scan = (self.buttons, self.mixer_buttons, self.perform_fx_buttons)
         hovered = next(
             ((name, rect) for collection in collections_to_scan for name, rect in collection.items()
@@ -6082,6 +6111,7 @@ class DrumPadNative:
         rect.topleft = (min(WINDOW_SIZE[0] - rect.width - 8, self.mouse_logical[0] + 12),
                         min(WINDOW_SIZE[1] - rect.height - 8, self.mouse_logical[1] + 14))
         pygame.draw.rect(self.screen, theme.PANEL_2, rect, border_radius=5)
+        pygame.draw.rect(self.screen, theme.RULE, rect, width=1, border_radius=5)
         self.screen.blit(text_surface, text_surface.get_rect(center=rect.center))
 
     def draw_header(self):
@@ -6096,7 +6126,8 @@ class DrumPadNative:
         connected = self.midi_input is not None
         audio_ready = bool(pygame.mixer.get_init())
         if connected and audio_ready:
-            self.draw_chip(pygame.Rect(132, 13, 186, 26), self.midi_device_name or "MIDI in", theme.SIGNAL)
+            name, dot, _hint = self.midi_activity()
+            self.draw_chip(pygame.Rect(132, 13, 186, 26), name, dot)
         else:
             self.buttons["reconnect"] = pygame.Rect(132, 12, 118, 28)
             self.draw_button(self.buttons["reconnect"], "Reconnect", danger=True)
@@ -6131,6 +6162,22 @@ class DrumPadNative:
         self.buttons["settings"] = pygame.Rect(928, 12, 88, 28)
         self.draw_button(self.buttons["kit"], f"Kit {self.active_kit}")
         self.draw_button(self.buttons["settings"], "Settings", icon="gear")
+    def midi_activity(self):
+        """Chip text and dot colour for the open MIDI port.
+
+        A device that splits into several endpoints will happily open a port
+        that never sends a note, which otherwise looks identical to a working
+        one. Silence for a few seconds after opening says so out loud.
+        """
+        name = self.midi_device_name or "MIDI in"
+        if not self.last_midi_event_ns:
+            silent_for = time.perf_counter() - self.midi_opened_at
+            if self.midi_opened_at and silent_for > MIDI_SILENCE_HINT_SECONDS:
+                return name, theme.DANGER, "No MIDI data on this port - switch Device"
+            return name, theme.INK_3, ""
+        since_ms = (time.perf_counter_ns() - self.last_midi_event_ns) / 1_000_000.0
+        return name, theme.ACCENT if since_ms < 180 else theme.SIGNAL, ""
+
     def draw_project_overlay(self):
         shade = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)
         shade.fill((20, 24, 26, 120))
@@ -6634,7 +6681,10 @@ class DrumPadNative:
             if recording
             else "Sample"
         )
-        self.draw_button(self.buttons["sample"], sample_label, danger=recording, icon="microphone")
+        self.draw_button(
+            self.buttons["sample"], sample_label, danger=recording,
+            enabled=recording or self.audio_inputs_available, icon="microphone",
+        )
         self.draw_button(self.buttons["sample_edit"], "Edit", enabled=bool(custom_file), icon="waveform")
         self.draw_button(self.buttons["sample_clear"], "Use Kit", enabled=bool(custom_file))
         sample_track = pygame.Rect(x0, 356, x1 - x0, 4)
@@ -6737,11 +6787,14 @@ class DrumPadNative:
 
         with self.state_lock:
             notice = self.surface_notice if time.perf_counter() < self.surface_notice_until else ""
-        surface_status = notice or self.sample_status
+        midi_hint = self.midi_activity()[2] if self.midi_input is not None else ""
+        surface_status = notice or midi_hint or self.sample_status or self.status
         if not surface_status and loop["last_export"] != "--":
             surface_status = "Export complete"
         if surface_status:
-            self.screen.blit(self.fit_text(self.small_font, surface_status, 316, theme.INK_2), (700, 786))
+            failed = any(word in surface_status.casefold() for word in ("failed", "unavailable", "no ", "disconnect"))
+            color = theme.DANGER if failed else theme.INK_2
+            self.screen.blit(self.fit_text(self.small_font, surface_status, 316, color), (700, 786))
     def sample_waveform_peaks(self, filename, bins=512):
         key = (filename, bins)
         if key in self.waveform_cache:
@@ -7294,6 +7347,7 @@ class DrumPadNative:
 def main():
     mutex = acquire_single_instance()
     if mutex is None:
+        print("STARRYPAD is already running. Switch to the open window.", file=sys.stderr)
         return
     try:
         app = DrumPadNative()
