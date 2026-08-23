@@ -74,7 +74,11 @@ Controls:
 - `+` / `-`: adjust volume.
 - Click a pad to select it, then use the `Sound` arrows or `Sensitivity` controls.
 - `Settings > Calibrate` learns three soft, natural, and hard hits plus duplicate-pulse spacing for the selected physical pad. Response and automatic dead time are stored per pad; setup is suggested only on the first MIDI connection.
-- `Settings > Audio Setup` selects the output and switches between `Low latency` and `Stable`. Advanced settings expose 48/44.1 kHz and 64/128/256 sample buffers; failed changes restore the last working setup.
+- `Settings > Audio Setup` shows what actually reaches the speakers, split into
+  the buffer and what the output device adds. The buffer is the only part the
+  app controls and it is usually the smaller half, so switching outputs can beat
+  any buffer setting. It also selects the output and switches between
+  `Low latency` and `Stable`. Advanced settings expose 48/44.1 kHz and 64/128/256 sample buffers; failed changes restore the last working setup.
 - The project name in the header opens New/Open/Recent/Save As/Collect. Projects autosave atomically, recover from a backup, and keep app/device preferences separate from musical content.
 - Project Undo/Redo keeps up to 20 pad, kit, sample, sensitivity, and tempo edits; loop Undo/Redo also keeps 20 operations.
 - `Feel` keeps original loop timing and offers Tight/Natural/Loose. Advanced controls expose Grid, Strength, Swing, Nudge, and deterministic Humanize; Reset restores the exact recorded timing.
@@ -154,6 +158,7 @@ Feedback the panel gives you:
 | `icons.py` | 24 icons drawn as lines and polygons on a 16x16 grid. |
 | `tools/make_assets.py` | Regenerates the grain tile and the app icons, including `starrypad.icns` and `starrypad.ico`. |
 | `tools/build_kit_b.py` | Rebuilds `samples/tr808/` from the CC0 pack and generates `samples/impact/`. |
+| `tools/trim_samples.py` | Reports or removes dead air at the front of any shipped sample. |
 
 Fonts are Barlow, Barlow Condensed and IBM Plex Mono, all under the SIL Open
 Font License; the licence texts sit beside them in `assets/fonts/`.
