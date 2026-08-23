@@ -85,6 +85,10 @@ AUDIO_HEALTH_CHECK_SECONDS = 2.0
 AUDIO_MODES = ("Low latency", "Stable")
 AUDIO_RATES = (48000, 44100)
 AUDIO_BUFFERS = (32, 64, 128, 256)
+# Where a total stops being something you play through and starts being
+# something you play around. Percussion is the strict case: sharp transients,
+# and you are syncing your own limb to them.
+LATENCY_BANDS = ((12.0, "tight"), (25.0, "playable"), (float("inf"), "you will feel this"))
 SAMPLE_PLAY_MODES = ("One-shot", "Gate", "Toggle", "Loop")
 FEEL_PRESETS = {
     "Tight": {"strength": 100, "swing": 50, "nudge_ms": 0, "humanize_ms": 0},
@@ -8381,10 +8385,18 @@ class DrumPadNative:
         self.draw_button(self.settings_buttons["audio_stable"], "Stable", active=self.audio_mode == "Stable")
 
         buffer_ms, device_ms = self.output_latency_ms()
+        reached = buffer_ms + device_ms
+        verdict, colour = next(
+            (label, tone)
+            for (limit, label), tone in zip(LATENCY_BANDS, (theme.SIGNAL, theme.ACCENT, theme.DANGER))
+            if reached < limit
+        )
         total = self.small_font.render(
-            f"About {buffer_ms + device_ms:.1f} ms to the speakers", True, value_color
+            f"About {reached:.1f} ms to the speakers", True, value_color
         )
         self.screen.blit(total, (294, 386))
+        badge = self.small_font.render(verdict, True, colour)
+        self.screen.blit(badge, (294 + total.get_width() + 12, 386))
         breakdown = self.data_font_sm.render(
             f"{buffer_ms:.1f} ms buffer  +  {device_ms:.1f} ms output device", True, label_color
         )
