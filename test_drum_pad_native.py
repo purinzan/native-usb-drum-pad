@@ -781,6 +781,70 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class VelocityFloorTests(unittest.TestCase):
+    """A controller whose softest hit is 50 should still reach a ghost note."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+
+    def test_a_floor_of_one_changes_nothing(self):
+        for velocity in (1, 50, 100, 127):
+            self.assertEqual(drum.expand_velocity(velocity, 1), velocity)
+
+    def test_the_floor_maps_to_the_bottom_and_the_top_stays_put(self):
+        self.assertEqual(drum.expand_velocity(50, 50), 1)
+        self.assertEqual(drum.expand_velocity(127, 50), 127)
+        # Anything under the floor is as soft as the pad goes.
+        self.assertEqual(drum.expand_velocity(30, 50), 1)
+
+    def test_expansion_is_monotonic(self):
+        values = [drum.expand_velocity(v, 50) for v in range(50, 128)]
+        self.assertEqual(values, sorted(values))
+
+    def test_the_bottom_of_the_range_becomes_reachable(self):
+        # Without a floor the softest real hit already sits a third up the curve
+        # and never selects the ghost layer.
+        self.assertGreater(drum.velocity_gain(50), 0.3)
+        self.assertNotEqual(drum.velocity_layer_mix(50)[0][0], "ghost")
+        expanded = drum.expand_velocity(50, 50)
+        self.assertLess(drum.velocity_gain(expanded), 0.15)
+        self.assertEqual(drum.velocity_layer_mix(expanded)[0][0], "ghost")
+
+    def test_a_hit_is_expanded_before_it_is_recorded(self):
+        app = self.app
+        app.set_velocity_floor(50)
+        app.play_pad = mock.Mock()
+        app.handle_midi_trigger("N", 36, 50, time.perf_counter_ns())
+        self.assertEqual(app.play_pad.call_args[0][1], 1)
+
+    def test_the_app_learns_the_softest_hit(self):
+        app = self.app
+        base = time.perf_counter_ns()
+        for index, velocity in enumerate((90, 62, 71)):
+            app.handle_midi_trigger("N", 36, velocity, base + index * 300_000_000)
+        self.assertEqual(app.velocity_observed_min, 62)
+        self.assertTrue(app.adopt_observed_floor())
+        self.assertEqual(app.velocity_floor, 62)
+        # Adopting resets the observation so the next take starts clean.
+        self.assertIsNone(app.velocity_observed_min)
+
+    def test_full_level_still_wins(self):
+        app = self.app
+        app.set_velocity_floor(50)
+        app.toggle_full_level()
+        app.play_pad = mock.Mock()
+        app.handle_midi_trigger("N", 36, 50, time.perf_counter_ns())
+        self.assertEqual(app.play_pad.call_args[0][1], 127)
+
+    def test_the_floor_survives_a_settings_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            app = drum.DrumPadNative(settings_path=path)
+            app.set_velocity_floor(50)
+            app.persist_settings()
+            self.assertEqual(drum.DrumPadNative(settings_path=path).velocity_floor, 50)
+
+
 class PadLayerTests(unittest.TestCase):
     """Up to four samples per pad, split by velocity."""
 
