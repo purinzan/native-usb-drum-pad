@@ -1396,6 +1396,7 @@ class DrumPadNative:
         self.clock = None
         self.grain = None
         self._device_latency_ms = None
+        self._latency_cache = {}
         self.audio_inputs_available = False
         self.last_midi_event_ns = 0
         self.midi_opened_at = 0.0
@@ -2813,23 +2814,46 @@ class DrumPadNative:
         except (ImportError, pygame.error):
             return []
 
-    def output_latency_ms(self):
-        """Buffer plus what the output device adds, which is usually the larger half.
+    def measure_output_latency(self, name=None):
+        """Open a stream and read what the device actually negotiated.
 
-        The buffer size is the only number the app controls, so showing it alone
-        makes a 10 ms device floor look like the app being slow.
+        The driver's advertised "low latency" figure is an estimate and was out
+        by a factor of three or four here: 12.9 ms advertised against 55.6 ms
+        measured on the built in speakers. Only the negotiated number is worth
+        showing, so this opens a stream to get it.
         """
+        key = name or ""
+        if key in self._latency_cache:
+            return self._latency_cache[key]
+        measured = None
+        try:
+            import sounddevice
+
+            with sounddevice.OutputStream(
+                device=name, samplerate=self.audio_rate, channels=2,
+                blocksize=self.audio_buffer, latency="low",
+            ) as stream:
+                measured = float(stream.latency) * 1000.0
+        except Exception:
+            measured = None
+        self._latency_cache[key] = measured
+        return measured
+
+    def fastest_output(self):
+        """The output with the lowest measured latency, and by how much."""
+        best = None
+        for name in self.audio_output_devices():
+            measured = self.measure_output_latency(name)
+            if measured is not None and (best is None or measured < best[1]):
+                best = (name, measured)
+        return best
+
+    def output_latency_ms(self):
+        """Buffer plus what the device adds, which is nearly all of it."""
         buffer_ms = self.audio_buffer * 1000.0 / max(1, self.audio_rate)
         if self._device_latency_ms is None:
-            self._device_latency_ms = 0.0
-            try:
-                import sounddevice
-
-                name = self.audio_output_name
-                info = sounddevice.query_devices(name, "output") if name else sounddevice.query_devices(kind="output")
-                self._device_latency_ms = float(info["default_low_output_latency"]) * 1000.0
-            except Exception:
-                pass
+            measured = self.measure_output_latency(self.audio_output_name)
+            self._device_latency_ms = 0.0 if measured is None else max(0.0, measured - buffer_ms)
         return buffer_ms, self._device_latency_ms
 
     def reload_mixer_sounds(self):
@@ -2855,6 +2879,7 @@ class DrumPadNative:
             self.initialize_mixer(output_name, requested_rate, requested_buffer)
             self.audio_output_name = output_name
             self._device_latency_ms = None
+            self._latency_cache.pop(output_name or "", None)
             self.audio_mode = requested_mode
             self.audio_rate = requested_rate
             self.audio_buffer = requested_buffer
@@ -8324,14 +8349,23 @@ class DrumPadNative:
         )
         self.screen.blit(breakdown, (294, 412))
 
-        self.settings_buttons["audio_advanced"] = pygame.Rect(294, 444, 120, 34)
+        best = self.fastest_output()
+        if best and best[0] != self.audio_output_name and best[1] < buffer_ms + device_ms - 2.0:
+            saving = (buffer_ms + device_ms) - best[1]
+            hint = self.fit_text(
+                self.small_font,
+                f"{best[0]} is {saving:.0f} ms faster", 454, theme.SIGNAL,
+            )
+            self.screen.blit(hint, (294, 434))
+
+        self.settings_buttons["audio_advanced"] = pygame.Rect(294, 464, 120, 34)
         self.draw_button(self.settings_buttons["audio_advanced"], "Advanced")
         if self.audio_advanced:
-            self.screen.blit(self.small_font.render("Sample rate", True, label_color), (294, 500))
-            self.settings_buttons["audio_rate"] = pygame.Rect(620, 484, 128, 34)
+            self.screen.blit(self.small_font.render("Sample rate", True, label_color), (294, 520))
+            self.settings_buttons["audio_rate"] = pygame.Rect(620, 504, 128, 34)
             self.draw_button(self.settings_buttons["audio_rate"], f"{self.audio_rate / 1000:g} kHz")
-            self.screen.blit(self.small_font.render("Buffer", True, label_color), (294, 552))
-            self.settings_buttons["audio_buffer"] = pygame.Rect(620, 536, 128, 34)
+            self.screen.blit(self.small_font.render("Buffer", True, label_color), (294, 572))
+            self.settings_buttons["audio_buffer"] = pygame.Rect(620, 556, 128, 34)
             self.draw_button(self.settings_buttons["audio_buffer"], f"{self.audio_buffer} samples")
 
         self.settings_buttons["audio_test"] = pygame.Rect(294, 594, 180, 38)
