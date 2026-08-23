@@ -1404,6 +1404,7 @@ class DrumPadNative:
         self._latency_cache = {}
         self._hal_device = None
         self._hal_original_frames = None
+        self._hal_applied_frames = None
         self.audio_inputs_available = False
         self.last_midi_event_ns = 0
         self.midi_opened_at = 0.0
@@ -2832,7 +2833,8 @@ class DrumPadNative:
             self._hal_device = device
             self._hal_original_frames = coreaudio.buffer_frames(device)
         applied = coreaudio.set_buffer_frames(device, buffer_size)
-        if applied is not None:
+        if applied is not None and applied != self._hal_applied_frames:
+            self._hal_applied_frames = applied
             self.log(f"Device buffer {self._hal_original_frames} -> {applied} frames")
         return applied
 
@@ -2841,6 +2843,7 @@ class DrumPadNative:
             coreaudio.set_buffer_frames(self._hal_device, self._hal_original_frames)
         self._hal_device = None
         self._hal_original_frames = None
+        self._hal_applied_frames = None
 
     @staticmethod
     def audio_output_devices():
@@ -3003,6 +3006,10 @@ class DrumPadNative:
         self.next_audio_health_check_at = now + AUDIO_HEALTH_CHECK_SECONDS
         # Sampling controls are only offered when something can actually record.
         self.audio_inputs_available = bool(audio_input_devices())
+        # Cheap insurance: if anything renegotiates the buffer while we hold
+        # the device, put it back rather than silently running long.
+        if self._hal_device and coreaudio.buffer_frames(self._hal_device) != self.audio_buffer:
+            coreaudio.set_buffer_frames(self._hal_device, self.audio_buffer)
         configured_missing = (
             self.audio_output_name is not None
             and self.audio_output_name not in self.audio_output_devices()

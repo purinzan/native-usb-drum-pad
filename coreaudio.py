@@ -1,9 +1,15 @@
 """Reach the CoreAudio device buffer, which SDL leaves alone.
 
 SDL takes a chunk size and buffers to it, but never sets the device's own buffer
-frame size, so the hardware sits at whatever it was last left at -- 512 frames
-here -- no matter what the app asks for. PortAudio does set it, which is why
-measurements taken through PortAudio looked better than the app actually is.
+frame size, so it sits at whatever this process's HAL client defaults to -- 512
+frames here -- no matter what the app asks for. PortAudio does set it, which is
+why measurements taken through PortAudio described a device configured better
+than the app ever configured it.
+
+The buffer frame size is per client, not global: each process gets its own value
+and the device runs to satisfy them all. Reading it from another process tells
+you nothing about this one, which is worth knowing before trying to verify any
+of this from the outside.
 
 Everything here degrades to None off macOS or when a property is unavailable, so
 callers can treat it as an optimisation rather than a dependency.
