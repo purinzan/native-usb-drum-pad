@@ -74,6 +74,7 @@ NOTE_REPEAT_RATES = ("1/4", "1/8", "1/16", "1/16T", "1/32")
 # the knob, the plus and minus buttons and the wheel all drive the same path.
 VALUE_TARGETS = (
     "bpm", "swing", "volume", "metronome", "sensitivity", "pad_level",
+    "velocity_floor",
 )
 PAD_MOVE_DELTAS = {
     pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: 4, pygame.K_DOWN: -4,
@@ -1040,6 +1041,22 @@ def all_sample_files():
     return sorted(files)
 
 
+def expand_velocity(raw_velocity, floor):
+    """Stretch the range a controller actually produces back out to 1..127.
+
+    A pad whose softest real hit is 50 never reaches a ghost note and starts its
+    dynamics a third of the way up the gain curve. Mapping its floor to 1 gives
+    back the bottom of the range instead of leaving it unreachable.
+    """
+    velocity = max(1, min(127, int(raw_velocity)))
+    floor = max(1, min(120, int(floor)))
+    if floor <= 1:
+        return velocity
+    if velocity <= floor:
+        return 1
+    return max(1, min(127, round(1 + (velocity - floor) * 126.0 / (127 - floor))))
+
+
 def velocity_gain(raw_velocity):
     velocity = max(1, min(127, raw_velocity))
     if velocity <= 50:
@@ -1523,6 +1540,8 @@ class DrumPadNative:
         self.note_repeat_latch = False
         self.full_level = False
         self.metronome_level = 70
+        self.velocity_floor = 1
+        self.velocity_observed_min = None
         self.value_target = "bpm"
         self.value_drag_from = None
         self.main_tab = "Main"
@@ -1813,6 +1832,10 @@ class DrumPadNative:
         self.repeat_rate = repeat_rate if repeat_rate in REPEAT_RATES else "1/16"
         self.bpm = max(BPM_MIN, min(BPM_MAX, int(data.get("bpm", 120))))
         self.metronome_enabled = bool(data.get("metronome_enabled", False))
+        try:
+            self.velocity_floor = max(1, min(120, int(data.get("velocity_floor", 1))))
+        except (TypeError, ValueError):
+            self.velocity_floor = 1
         self.calibration_prompted = bool(data.get("calibration_prompted", False))
         record_start_mode = str(data.get("record_start_mode", "Count 1 bar"))
         self.record_start_mode = record_start_mode if record_start_mode in RECORD_START_MODES else "Count 1 bar"
@@ -1920,6 +1943,7 @@ class DrumPadNative:
             "repeat_enabled": self.repeat_enabled,
             "repeat_rate": self.repeat_rate,
             "metronome_enabled": self.metronome_enabled,
+            "velocity_floor": self.velocity_floor,
             "record_start_mode": self.record_start_mode,
             "sample_input_name": self.sample_input_name,
             "sample_start_mode": self.sample_start_mode,
@@ -4356,6 +4380,12 @@ class DrumPadNative:
                     self.toggle_continuous_sampling()
                 elif name == "record_start":
                     self.cycle_record_start_mode()
+                elif name == "floor_down":
+                    self.set_velocity_floor(self.velocity_floor - 1)
+                elif name == "floor_up":
+                    self.set_velocity_floor(self.velocity_floor + 1)
+                elif name == "floor_learn":
+                    self.adopt_observed_floor()
                 elif name == "calibrate":
                     self.start_pad_calibration()
                 elif name == "audio_setup":
@@ -4647,6 +4677,8 @@ class DrumPadNative:
         if name == "pad_level":
             percent = round(self.pad_volume[index] * 100)
             return "Pad level", percent, f"{percent}%", 1
+        if name == "velocity_floor":
+            return "Velocity floor", self.velocity_floor, f"{self.velocity_floor}", 1
         return "Tempo", self.bpm, f"{self.bpm}.00", 1
 
     def nudge_value(self, steps):
@@ -4678,6 +4710,8 @@ class DrumPadNative:
             self.push_project_history()
             self.pad_volume[index] = max(0.0, min(1.5, self.pad_volume[index] + steps * 0.01))
             self.persist_settings_async()
+        elif name == "velocity_floor":
+            self.set_velocity_floor(self.velocity_floor + steps)
 
     def select_value_target(self, name):
         if name in VALUE_TARGETS:
@@ -4794,6 +4828,25 @@ class DrumPadNative:
         while self.active_kit != slot:
             self.switch_kit()
         return True
+
+    def set_velocity_floor(self, floor):
+        """The softest velocity this controller can actually produce."""
+        floor = max(1, min(120, int(floor)))
+        if floor == self.velocity_floor:
+            return False
+        self.velocity_floor = floor
+        self.velocity_observed_min = None
+        self.status = (
+            f"Velocity floor {floor} - hits from {floor} now cover the full range"
+            if floor > 1 else "Velocity floor off - using the raw range"
+        )
+        self.persist_settings_async()
+        return True
+
+    def adopt_observed_floor(self):
+        if not self.velocity_observed_min:
+            return False
+        return self.set_velocity_floor(self.velocity_observed_min)
 
     def toggle_full_level(self):
         self.full_level = not self.full_level
@@ -6487,6 +6540,10 @@ class DrumPadNative:
         # Recorded before any mapping decision: this asks whether the port is
         # alive, not whether the message landed on a pad.
         self.last_midi_event_ns = received_ns or time.perf_counter_ns()
+        if kind == "N":
+            observed = self.velocity_observed_min
+            self.velocity_observed_min = velocity if observed is None else min(observed, velocity)
+        velocity = expand_velocity(velocity, self.velocity_floor)
         if self.full_level:
             velocity = 127
         if kind == "CC" and number == 4 and MAPPING_MODES[self.mapping_mode] == "GM Drums":
@@ -8354,13 +8411,34 @@ class DrumPadNative:
         self.settings_buttons["record_start"] = pygame.Rect(646, 416, 102, 34)
         self.draw_button(self.settings_buttons["record_start"], "Change")
 
-        profile = self.pad_calibrations[self.selected_pad]
-        setup_label = self.small_font.render(f"Pad {self.selected_pad + 1} setup", True, label_color)
+        pad = self.pad_of(self.selected_pad)
+        profile = self.pad_calibrations[pad]
+        setup_label = self.small_font.render("Pad response", True, label_color)
         self.screen.blit(setup_label, (294, 474))
-        setup_state = "Calibrated" if profile["enabled"] else "Default response"
-        self.screen.blit(self.small_font.render(setup_state, True, value_color), (294, 497))
-        self.settings_buttons["calibrate"] = pygame.Rect(626, 478, 122, 34)
-        self.draw_button(self.settings_buttons["calibrate"], "Calibrate")
+        seen = self.velocity_observed_min
+        floor_note = f"floor {self.velocity_floor}" if self.velocity_floor > 1 else "full range"
+        # The row is 144px wide before the buttons start, so it carries the pad
+        # and the floor; the calibration state rides on its own button.
+        self.screen.blit(
+            self.fit_text(self.small_font, f"Pad {pad + 1}  \u00b7  {floor_note}", 132, value_color),
+            (294, 497),
+        )
+        self.settings_buttons["floor_down"] = pygame.Rect(438, 478, 34, 34)
+        self.settings_buttons["floor_up"] = pygame.Rect(476, 478, 34, 34)
+        self.settings_buttons["floor_learn"] = pygame.Rect(516, 478, 84, 34)
+        self.settings_buttons["calibrate"] = pygame.Rect(606, 478, 142, 34)
+        self.draw_button(self.settings_buttons["floor_down"], "-")
+        self.draw_button(self.settings_buttons["floor_up"], "+")
+        self.draw_button(
+            self.settings_buttons["floor_learn"],
+            f"Use {seen}" if seen and seen != self.velocity_floor else "Use",
+            enabled=bool(seen) and seen != self.velocity_floor,
+        )
+        self.draw_button(
+            self.settings_buttons["calibrate"],
+            "Recalibrate pad" if profile["enabled"] else "Calibrate pad",
+            active=profile["enabled"],
+        )
 
         audio_label = self.small_font.render("Audio output", True, label_color)
         self.screen.blit(audio_label, (294, 536))
