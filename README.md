@@ -113,7 +113,15 @@ Controls:
   kick somewhere easier to reach does not change how the loop sounds.
   Sensitivity and calibration stay with the physical pad they were measured on.
   One undo puts the layout back.
-- Drop an audio file onto the window to trim, normalize, convert, and assign it to the selected pad.
+- Drop an audio file onto the window to trim, normalize, convert, and assign it
+  to the selected pad. SDL reads wav, mp3, ogg, flac and aiff; anything else,
+  including the m4a that most of a Mac's music library is in, is decoded through
+  `ffmpeg` when it is installed. That also picks up opus, wma and the audio
+  track of a video file.
+- Dropping a whole song does not put four minutes on a pad. The file is kept
+  whole, but the part that sounds is narrowed to four bars at the detected
+  tempo, and Chop opens so the next move is spreading those bars across the
+  pads. `Edit` moves the region through the rest of the song.
 - `Edit` opens a non-destructive waveform editor for crop, zoom, normalize, reverse, fades, tune, A/B, and One-shot/Gate/Toggle/Loop playback.
 - `Chop` splits a sample by transients, equal divisions, manual waveform marks, or live pad taps and expands it across available pads with optional play-through and choke behavior.
 - Sample tempo detection includes Half/Double correction and either Repitch or pitch-preserving WSOLA Stretch that follows the project BPM.
