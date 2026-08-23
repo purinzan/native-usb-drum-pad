@@ -38,7 +38,8 @@ import pygame
 
 
 ROOT = Path(__file__).resolve().parent
-SAMPLE_DIR = ROOT / "samples" / "salamander-lowlatency" / "OH"
+SAMPLES_ROOT = ROOT / "samples"
+SAMPLE_DIR = SAMPLES_ROOT / "salamander-lowlatency" / "OH"
 SETTINGS_FILE = ROOT / "drum_pad_settings.json"
 EXPORT_DIR = ROOT / "exports"
 USER_SAMPLE_DIR = ROOT / "user-samples"
@@ -692,6 +693,17 @@ S["snare1_mid"] += S["snare1_soft"][:2]
 S["ride2_soft"] += S["ride2_hard"][:1]
 
 
+# TR-808 (CC0) and the generated glass. One file each for the drum machine,
+# because a drum machine repeats exactly; three for glass, because it does not.
+for _name in (
+    "kick8", "kick8_tight", "kick8_long", "snare8", "snare8_bright", "hat8",
+    "openhat8", "openhat8_long", "clap8", "rim8", "cowbell8", "cymbal8",
+    "hitom8", "midtom8", "lowtom8", "conga8", "maraca8", "clave8",
+):
+    S[_name] = [f"tr808/{_name}.wav"]
+for _name in ("glass_tap", "glass_break", "glass_shatter"):
+    S[_name] = [f"impact/{_name}_{_variant}.wav" for _variant in (1, 2, 3)]
+
 KIT = {
     "kick": [{"files": S["kick_hard"], "velocity_files": {"soft": S["kick_soft"], "mid": S["kick_mid"], "hard": S["kick_hard"]}, "gain": 1.0}],
     "snare": [{"files": S["snare1_hard"], "velocity_files": {"soft": S["snare1_soft"], "mid": S["snare1_mid"], "hard": S["snare1_hard"]}, "gain": 0.98}],
@@ -716,6 +728,29 @@ KIT = {
     ],
     "shaker": [{"files": S["closed_hat"], "velocity_files": {"soft": S["closed_hat_soft"], "mid": S["closed_hat_soft"], "hard": S["closed_hat"]}, "gain": 0.5, "duration_ms": 60}],
     "clave": [{"files": S["stick"], "gain": 0.52, "duration_ms": 55}],
+
+    "kick8": [{"files": S["kick8"], "gain": 1.0}],
+    "kick8_tight": [{"files": S["kick8_tight"], "gain": 1.0}],
+    "kick8_long": [{"files": S["kick8_long"], "gain": 1.0}],
+    "snare8": [{"files": S["snare8"], "gain": 0.94}],
+    "snare8_bright": [{"files": S["snare8_bright"], "gain": 0.94}],
+    "hat8": [{"files": S["hat8"], "gain": 0.8, "choke": "hat8"}],
+    "openhat8": [{"files": S["openhat8"], "gain": 0.8, "choke": "hat8"}],
+    "openhat8_long": [{"files": S["openhat8_long"], "gain": 0.8, "choke": "hat8"}],
+    "clap8": [{"files": S["clap8"], "gain": 0.92}],
+    "rim8": [{"files": S["rim8"], "gain": 0.86}],
+    "cowbell8": [{"files": S["cowbell8"], "gain": 0.84}],
+    "cymbal8": [{"files": S["cymbal8"], "gain": 0.74}],
+    "hitom8": [{"files": S["hitom8"], "gain": 0.92}],
+    "midtom8": [{"files": S["midtom8"], "gain": 0.92}],
+    "lowtom8": [{"files": S["lowtom8"], "gain": 0.94}],
+    "conga8": [{"files": S["conga8"], "gain": 0.9}],
+    "maraca8": [{"files": S["maraca8"], "gain": 0.7}],
+    "clave8": [{"files": S["clave8"], "gain": 0.78}],
+
+    "glass_tap": [{"files": S["glass_tap"], "gain": 0.7, "duration_ms": 420}],
+    "glass_break": [{"files": S["glass_break"], "gain": 0.82}],
+    "glass_shatter": [{"files": S["glass_shatter"], "gain": 0.86}],
 }
 
 KIT.update({
@@ -788,6 +823,23 @@ def synth_color(synth, fallback):
     return SYNTH_COLORS[base] if base else fallback
 
 
+# The 808 sounds borrow the hue of the acoustic voice they stand in for, so the
+# stripe still reads as "this is the kick" after switching kits. Glass gets its
+# own, because it stands in for nothing.
+SYNTH_COLORS.update({
+    "kick8": SYNTH_COLORS["kick"], "kick8_tight": SYNTH_COLORS["kick"],
+    "kick8_long": SYNTH_COLORS["kick"], "snare8": SYNTH_COLORS["snare"],
+    "snare8_bright": SYNTH_COLORS["snare"], "hat8": SYNTH_COLORS["hat"],
+    "openhat8": SYNTH_COLORS["open_hat"], "openhat8_long": SYNTH_COLORS["open_hat"],
+    "clap8": SYNTH_COLORS["clap"], "rim8": SYNTH_COLORS["rim"],
+    "cowbell8": SYNTH_COLORS["cowbell"], "cymbal8": SYNTH_COLORS["crash"],
+    "hitom8": SYNTH_COLORS["high_tom"], "midtom8": SYNTH_COLORS["mid_tom"],
+    "lowtom8": SYNTH_COLORS["low_tom"], "conga8": SYNTH_COLORS["floor_tom"],
+    "maraca8": SYNTH_COLORS["shaker"], "clave8": SYNTH_COLORS["clave"],
+    "glass_tap": (150, 205, 214), "glass_break": (120, 186, 200),
+    "glass_shatter": (96, 166, 186),
+})
+
 SYNTH_LABELS = {pad["synth"]: pad["name"] for pad in PADS}
 SYNTH_LABELS.update({
     "snare": "Snare Tight", "snare_warm": "Snare Warm",
@@ -799,6 +851,14 @@ SYNTH_LABELS.update({
     "hat_semi": "Hat Semi",
     "ride": "Ride Dry", "ride_bright": "Ride Bright",
     "ride_dark": "Ride Dark", "ride_washy": "Ride Washy",
+    "kick8": "808 Kick", "kick8_tight": "808 Kick Tight", "kick8_long": "808 Kick Long",
+    "snare8": "808 Snare", "snare8_bright": "808 Snare Bright",
+    "hat8": "808 Hat", "openhat8": "808 Open Hat", "openhat8_long": "808 Open Hat Long",
+    "clap8": "808 Clap", "rim8": "808 Rim", "cowbell8": "808 Cowbell",
+    "cymbal8": "808 Cymbal", "hitom8": "808 High Tom", "midtom8": "808 Mid Tom",
+    "lowtom8": "808 Low Tom", "conga8": "808 Conga", "maraca8": "808 Maraca",
+    "clave8": "808 Clave",
+    "glass_tap": "Glass Tap", "glass_break": "Glass Break", "glass_shatter": "Glass Shatter",
 })
 TIMBRE_FAMILIES = (
     ("snare", "snare_warm", "snare_deep", "snare_bright"),
@@ -808,6 +868,16 @@ TIMBRE_FAMILIES = (
 )
 HAT_OPEN_PAIRS = dict(zip(TIMBRE_FAMILIES[1], TIMBRE_FAMILIES[2]))
 DEFAULT_PAD_SYNTHS = tuple(pad["synth"] for pad in PADS)
+
+# Kit B: the 808 core where the acoustic kit has its drums, glass where it has
+# its cymbals and hand percussion.
+KIT_B_PAD_SYNTHS = (
+    "kick8_long", "snare8", "hat8", "openhat8",
+    "lowtom8", "midtom8", "hitom8", "conga8",
+    "clap8", "rim8", "cowbell8", "glass_shatter",
+    "cymbal8", "glass_break", "maraca8", "glass_tap",
+)
+FACTORY_KIT_SYNTHS = {"A": DEFAULT_PAD_SYNTHS, "B": KIT_B_PAD_SYNTHS}
 SYNTH_TO_GM_NOTE = {
     "kick": 36,
     "snare": 38,
@@ -831,6 +901,15 @@ for family in TIMBRE_FAMILIES:
     for synth in family[1:]:
         SYNTH_TO_GM_NOTE[synth] = note
 SYNTH_TO_GM_NOTE["hat_semi"] = 44
+
+
+def sample_path(name):
+    """A bare filename is Salamander; a name with a folder is its own pack.
+
+    Packs keep their own directory so their licence sits beside them rather
+    than being mixed into someone else's folder.
+    """
+    return SAMPLES_ROOT / name if "/" in name else SAMPLE_DIR / name
 
 
 def all_sample_files():
@@ -1297,10 +1376,7 @@ class DrumPadNative:
         self.project_history = collections.deque(maxlen=20)
         self.project_redo = collections.deque(maxlen=20)
         self.active_kit = "A"
-        self.kit_slots = {
-            slot: self.default_kit_profile()
-            for slot in KIT_SLOTS
-        }
+        self.kit_slots = {slot: self.factory_kit_profile(slot) for slot in KIT_SLOTS}
         self.pad_synths = list(DEFAULT_PAD_SYNTHS)
         self.pad_sensitivity = [1.0] * len(PADS)
         self.pad_volume = [1.0] * len(PADS)
@@ -1473,6 +1549,13 @@ class DrumPadNative:
         self.apply_mapping_mode()
 
     @staticmethod
+    def factory_kit_profile(slot):
+        """The shipped contents of one kit slot."""
+        profile = DrumPadNative.default_kit_profile()
+        profile["pad_synths"] = list(FACTORY_KIT_SYNTHS.get(slot, DEFAULT_PAD_SYNTHS))
+        return profile
+
+    @staticmethod
     def default_kit_profile():
         return {
             "pad_synths": list(DEFAULT_PAD_SYNTHS),
@@ -1639,8 +1722,14 @@ class DrumPadNative:
 
         saved_kits = data.get("kits", {})
         if isinstance(saved_kits, dict):
+            untouched = self.default_kit_profile()
             for slot in KIT_SLOTS:
-                self.kit_slots[slot] = self.sanitize_kit_profile(saved_kits.get(slot))
+                profile = self.sanitize_kit_profile(saved_kits.get(slot))
+                # A slot still holding the shipped acoustic kit gets whatever
+                # that slot ships with now; anything edited is left alone.
+                if profile == untouched:
+                    profile = self.factory_kit_profile(slot)
+                self.kit_slots[slot] = profile
         self.apply_kit_profile(self.kit_slots[self.active_kit])
 
     def load_settings(self):
@@ -1876,8 +1965,14 @@ class DrumPadNative:
         self.loop_redo.clear()
         saved_kits = data.get("kits", {})
         if isinstance(saved_kits, dict):
+            untouched = self.default_kit_profile()
             for slot in KIT_SLOTS:
-                self.kit_slots[slot] = self.sanitize_kit_profile(saved_kits.get(slot))
+                profile = self.sanitize_kit_profile(saved_kits.get(slot))
+                # A slot still holding the shipped acoustic kit gets whatever
+                # that slot ships with now; anything edited is left alone.
+                if profile == untouched:
+                    profile = self.factory_kit_profile(slot)
+                self.kit_slots[slot] = profile
         self.apply_kit_profile(self.kit_slots[self.active_kit])
         name = data.get("name")
         if isinstance(name, str) and name.strip():
@@ -2021,7 +2116,7 @@ class DrumPadNative:
         self.selected_pad = 0
         self.pad_selection = {0}
         self.active_kit = "A"
-        self.kit_slots = {slot: self.default_kit_profile() for slot in KIT_SLOTS}
+        self.kit_slots = {slot: self.factory_kit_profile(slot) for slot in KIT_SLOTS}
         self.apply_kit_profile(self.kit_slots[self.active_kit])
         self.bpm = 120
         with self.loop_lock:
@@ -2693,7 +2788,7 @@ class DrumPadNative:
     def load_samples(self):
         missing = []
         for file in all_sample_files():
-            path = SAMPLE_DIR / file
+            path = sample_path(file)
             if not path.exists():
                 missing.append(file)
                 continue
