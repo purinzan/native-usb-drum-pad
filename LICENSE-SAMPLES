@@ -1,0 +1,10 @@
+Audio samples: samples/salamander/ and samples/salamander-lowlatency/
+
+These files are derived from the Salamander Drumkit by Alexander Holm,
+released under the Creative Commons Attribution 3.0 Unported license
+(CC BY 3.0): https://creativecommons.org/licenses/by/3.0/
+
+The files in this repository have been trimmed, level-matched, and
+reorganized for low-latency playback. They remain licensed under CC BY 3.0.
+
+Attribution: Salamander Drumkit by Alexander Holm, CC BY 3.0.

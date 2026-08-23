@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local runtime state (per-user, not part of the app)
+drum_pad_settings.json
+drum_pad_settings.json.bak
+projects/
+exports/
+user-samples/
+*.bak
+
+# OS
+Thumbs.db
+.DS_Store
