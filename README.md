@@ -218,6 +218,18 @@ They are listed because knowing what is absent is worth more than discovering it
 The MIDI tab currently opens the existing Settings panel, and the Sampler tab
 opens the sample editor or the browser, rather than being screens of their own.
 
+## One control per thing
+
+Every destination on the performance surface has exactly one button. The mixer
+is reached from its tab, not also from the right rail; the project menu from the
+project field, not also from a `...` beside it; the kit from the four slot
+buttons, while the header names the loaded program without also switching it.
+Booleans are one button that changes colour, the way `Repeat` and `Full Level`
+already worked, rather than an On button beside an Off button.
+
+The four `Kit` buttons are the exception that proves it: four buttons for four
+different kits is direct selection, not four ways to the same place.
+
 ## Design
 
 | Module | Holds |
