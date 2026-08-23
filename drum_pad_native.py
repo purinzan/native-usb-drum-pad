@@ -3432,10 +3432,7 @@ class DrumPadNative:
         self.log(f"Sample assigned to pad {target_pad + 1}")
         if not self.sample_continuous_active:
             return
-        next_pad = next(
-            (index for index in range(target_pad + 1, len(PADS)) if not self.custom_sample_files[index]),
-            None,
-        )
+        next_pad = next(iter(self.free_bank_slots(after=target_pad)), None)
         if next_pad is None:
             self.sample_continuous_active = False
             self.sample_status = "All following pads are filled"
@@ -3765,15 +3762,15 @@ class DrumPadNative:
             return False
         markers = self.current_chop_markers(samples)
         slices = slice_sample_audio(samples, markers, self.chop_play_through)
-        start = self.selected_pad + (1 if self.chop_keep_original else 0)
         targets = [] if self.chop_keep_original else [self.selected_pad]
-        targets.extend(
-            index for index in range(start, len(PADS))
-            if index != self.selected_pad and not self.custom_sample_files[index]
-        )
+        targets.extend(self.free_bank_slots(after=self.selected_pad))
         targets = targets[:len(slices)]
         if len(targets) < len(slices):
-            self.sample_status = f"Need {len(slices) - len(targets)} more empty pads"
+            short = len(slices) - len(targets)
+            self.sample_status = (
+                f"Need {short} more empty pad" + ("s" if short != 1 else "")
+                + f" in bank {PAD_BANKS[self.pad_bank]}"
+            )
             return False
         self.push_project_history()
         USER_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
@@ -4896,6 +4893,26 @@ class DrumPadNative:
 
     def bank_of(self, slot):
         return int(slot) // PAD_COUNT
+
+    def bank_slots(self):
+        """The sixteen sound slots the current bank puts under the pads."""
+        return [self.slot(pad) for pad in range(PAD_COUNT)]
+
+    def free_bank_slots(self, after=None, wrap=False):
+        """Slots in the current bank with no sample on them.
+
+        Anything looking for somewhere to put audio has to walk the bank, not
+        the first sixteen slots. Walking 0..15 works only on bank A and silently
+        finds nothing anywhere else.
+        """
+        slots = self.bank_slots()
+        if after is None:
+            return [slot for slot in slots if not self.custom_sample_files[slot]]
+        position = slots.index(after) if after in slots else -1
+        # `after` itself is never a candidate, wrapping or not: the caller is
+        # already using it.
+        ordered = slots[position + 1:] + (slots[:position] if wrap else [])
+        return [slot for slot in ordered if not self.custom_sample_files[slot]]
 
     def select_bank(self, bank):
         """Switch banks and carry the selection to the same pad in the new one."""
@@ -6290,10 +6307,7 @@ class DrumPadNative:
         with self.loop_lock:
             if self.bounce_processing or not self.loop_events:
                 return False
-            target = next(
-                (index for index in range(self.selected_pad + 1, len(PADS)) if not self.custom_sample_files[index]),
-                next((index for index in range(self.selected_pad) if not self.custom_sample_files[index]), None),
-            )
+            target = next(iter(self.free_bank_slots(after=self.selected_pad, wrap=True)), None)
             if target is None:
                 self.set_surface_notice("No empty pad for Bounce")
                 return False
@@ -8328,10 +8342,8 @@ class DrumPadNative:
         slice_count = len(marker_ratios) + 1
         if self.chop_mode in ("Transient", "Equal"):
             slice_count = self.chop_count
-        start = self.selected_pad + (1 if self.chop_keep_original else 0)
-        available = (0 if self.chop_keep_original else 1) + sum(
-            1 for index in range(start, len(PADS))
-            if index != self.selected_pad and not self.custom_sample_files[index]
+        available = (0 if self.chop_keep_original else 1) + len(
+            self.free_bank_slots(after=self.selected_pad)
         )
         status = f"{slice_count} slices  /  {available} pads available"
         status_color = theme.DANGER if slice_count > available else theme.INK_2

@@ -1127,6 +1127,29 @@ class PadBankTests(unittest.TestCase):
         app.handle_midi_trigger("N", 36, 100, time.perf_counter_ns() + 500_000_000)
         self.assertEqual(app.play_pad.call_args[0][0], 32)
 
+    def test_free_slots_are_looked_for_in_the_current_bank(self):
+        """Walking 0..15 finds nothing on any bank but A."""
+        app = self.app
+        app.select_bank(2)
+        free = app.free_bank_slots()
+        self.assertEqual(len(free), drum.PAD_COUNT)
+        self.assertTrue(all(32 <= slot < 48 for slot in free), free)
+
+    def test_a_filled_slot_drops_out_of_the_free_list(self):
+        app = self.app
+        app.select_bank(1)
+        app.custom_sample_files[app.slot(3)] = "taken.wav"
+        self.assertNotIn(app.slot(3), app.free_bank_slots())
+
+    def test_the_search_starts_after_a_given_slot_and_can_wrap(self):
+        app = self.app
+        start = app.slot(13)
+        self.assertEqual(app.free_bank_slots(after=start), [app.slot(14), app.slot(15)])
+        wrapped = app.free_bank_slots(after=start, wrap=True)
+        self.assertEqual(len(wrapped), drum.PAD_COUNT - 1)
+        self.assertEqual(wrapped[0], app.slot(14))
+        self.assertEqual(wrapped[-1], app.slot(12))
+
     def test_a_project_saved_before_banks_grows_to_four(self):
         app = self.app
         legacy = app.default_kit_profile()
