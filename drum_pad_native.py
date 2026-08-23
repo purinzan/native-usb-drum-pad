@@ -1,7 +1,6 @@
 import os
 import random
 import shutil
-import ctypes
 import collections
 import heapq
 import json
@@ -16,8 +15,21 @@ import wave
 import zipfile
 from pathlib import Path
 
+from platform_backend import (
+    AUDIO_DRIVER,
+    UI_FONT_NAME,
+    MidiInput,
+    MidiOutput,
+    acquire_single_instance,
+    enable_audio_thread_priority,
+    enable_process_priority,
+    release_audio_thread_priority,
+    release_single_instance,
+)
+
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
-os.environ.setdefault("SDL_AUDIODRIVER", "wasapi")
+if AUDIO_DRIVER:
+    os.environ.setdefault("SDL_AUDIODRIVER", AUDIO_DRIVER)
 
 import pygame
 
@@ -464,13 +476,6 @@ def realize_loop_events(events, event_meta, bars, cycle=0):
                 realized.append((repeat_beat, pad, velocity))
     return sorted(realized)
 
-CALLBACK_FUNCTION = 0x00030000
-MIM_DATA = 0x3C3
-MMSYSERR_NOERROR = 0
-ERROR_ALREADY_EXISTS = 183
-ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
-THREAD_PRIORITY_HIGHEST = 2
-SINGLE_INSTANCE_NAME = "Local\\NativeUsbDrumPad.SingleInstance"
 KIT_SLOTS = ("A", "B", "C", "D")
 REPEAT_RATES = {
     "1/8": 2.0,
@@ -484,84 +489,6 @@ LOOP_BAR_OPTIONS = (1, 2, 4)
 RECORD_START_MODES = ("Instant", "Next bar", "Count 1 bar")
 SAMPLE_START_MODES = ("Auto", "Manual")
 MIDI_TICKS_PER_BEAT = 480
-
-
-class MIDIINCAPS(ctypes.Structure):
-    _fields_ = [
-        ("wMid", ctypes.c_ushort),
-        ("wPid", ctypes.c_ushort),
-        ("vDriverVersion", ctypes.c_uint),
-        ("szPname", ctypes.c_wchar * 32),
-        ("dwSupport", ctypes.c_uint),
-    ]
-
-
-class MIDIOUTCAPS(ctypes.Structure):
-    _fields_ = [
-        ("wMid", ctypes.c_ushort), ("wPid", ctypes.c_ushort),
-        ("vDriverVersion", ctypes.c_uint), ("szPname", ctypes.c_wchar * 32),
-        ("wTechnology", ctypes.c_ushort), ("wVoices", ctypes.c_ushort),
-        ("wNotes", ctypes.c_ushort), ("wChannelMask", ctypes.c_ushort),
-        ("dwSupport", ctypes.c_uint),
-    ]
-
-
-MidiCallback = ctypes.WINFUNCTYPE(
-    None,
-    ctypes.c_void_p,
-    ctypes.c_uint,
-    ctypes.c_size_t,
-    ctypes.c_size_t,
-    ctypes.c_size_t,
-)
-
-
-winmm = ctypes.WinDLL("winmm")
-kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-avrt = ctypes.WinDLL("avrt", use_last_error=True)
-
-winmm.midiInGetNumDevs.restype = ctypes.c_uint
-winmm.midiInGetDevCapsW.argtypes = [ctypes.c_size_t, ctypes.POINTER(MIDIINCAPS), ctypes.c_uint]
-winmm.midiInGetDevCapsW.restype = ctypes.c_uint
-winmm.midiInOpen.argtypes = [
-    ctypes.POINTER(ctypes.c_void_p),
-    ctypes.c_uint,
-    MidiCallback,
-    ctypes.c_size_t,
-    ctypes.c_uint,
-]
-winmm.midiInOpen.restype = ctypes.c_uint
-winmm.midiInStart.argtypes = [ctypes.c_void_p]
-winmm.midiInStart.restype = ctypes.c_uint
-winmm.midiInStop.argtypes = [ctypes.c_void_p]
-winmm.midiInStop.restype = ctypes.c_uint
-winmm.midiInClose.argtypes = [ctypes.c_void_p]
-winmm.midiInClose.restype = ctypes.c_uint
-winmm.midiOutGetNumDevs.restype = ctypes.c_uint
-winmm.midiOutGetDevCapsW.argtypes = [ctypes.c_size_t, ctypes.POINTER(MIDIOUTCAPS), ctypes.c_uint]
-winmm.midiOutGetDevCapsW.restype = ctypes.c_uint
-winmm.midiOutOpen.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_uint]
-winmm.midiOutOpen.restype = ctypes.c_uint
-winmm.midiOutShortMsg.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-winmm.midiOutShortMsg.restype = ctypes.c_uint
-winmm.midiOutClose.argtypes = [ctypes.c_void_p]
-winmm.midiOutClose.restype = ctypes.c_uint
-
-kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-kernel32.CreateMutexW.restype = ctypes.c_void_p
-kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
-kernel32.CloseHandle.restype = ctypes.c_bool
-kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-kernel32.GetCurrentThread.restype = ctypes.c_void_p
-kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint]
-kernel32.SetPriorityClass.restype = ctypes.c_bool
-kernel32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
-kernel32.SetThreadPriority.restype = ctypes.c_bool
-
-avrt.AvSetMmThreadCharacteristicsW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_uint)]
-avrt.AvSetMmThreadCharacteristicsW.restype = ctypes.c_void_p
-avrt.AvRevertMmThreadCharacteristics.argtypes = [ctypes.c_void_p]
-avrt.AvRevertMmThreadCharacteristics.restype = ctypes.c_bool
 
 
 PADS = [
@@ -1198,128 +1125,6 @@ class AudioSampler:
                 "clipped": self.clipped,
                 "stop_reason": self.stop_reason,
             }
-
-
-def acquire_single_instance():
-    ctypes.set_last_error(0)
-    mutex = kernel32.CreateMutexW(None, False, SINGLE_INSTANCE_NAME)
-    if not mutex:
-        raise ctypes.WinError(ctypes.get_last_error())
-    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
-        kernel32.CloseHandle(mutex)
-        return None
-    return mutex
-
-
-def enable_process_priority():
-    kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS)
-
-
-def enable_audio_thread_priority():
-    task_index = ctypes.c_uint()
-    task_handle = avrt.AvSetMmThreadCharacteristicsW("Pro Audio", ctypes.byref(task_index))
-    kernel32.SetThreadPriority(kernel32.GetCurrentThread(), THREAD_PRIORITY_HIGHEST)
-    return task_handle
-
-
-class WinMidiInput:
-    def __init__(self, device_id, event_queue):
-        self.device_id = device_id
-        self.event_queue = event_queue
-        self.handle = ctypes.c_void_p()
-        self.callback = MidiCallback(self._callback)
-        rc = winmm.midiInOpen(
-            ctypes.byref(self.handle),
-            ctypes.c_uint(device_id),
-            self.callback,
-            0,
-            CALLBACK_FUNCTION,
-        )
-        if rc != MMSYSERR_NOERROR:
-            raise RuntimeError(f"midiInOpen rc={rc}")
-        rc = winmm.midiInStart(self.handle)
-        if rc != MMSYSERR_NOERROR:
-            self.close()
-            raise RuntimeError(f"midiInStart rc={rc}")
-
-    @staticmethod
-    def devices():
-        devices = []
-        count = winmm.midiInGetNumDevs()
-        for device_id in range(count):
-            caps = MIDIINCAPS()
-            rc = winmm.midiInGetDevCapsW(
-                ctypes.c_size_t(device_id),
-                ctypes.byref(caps),
-                ctypes.sizeof(caps),
-            )
-            if rc == MMSYSERR_NOERROR:
-                devices.append((device_id, caps.szPname))
-        return devices
-
-    def _callback(self, _handle, message, _instance, param1, _param2):
-        if message != MIM_DATA:
-            return
-        received_ns = time.perf_counter_ns()
-        data = int(param1)
-        status = data & 0xFF
-        data1 = (data >> 8) & 0xFF
-        data2 = (data >> 16) & 0xFF
-        if status in (0xF8, 0xFA, 0xFB, 0xFC):
-            self.event_queue.put(("MIDI_CLOCK", status, received_ns))
-            return
-        command = status & 0xF0
-        if command == 0x90:
-            event_type = "MIDI" if data2 > 0 else "MIDI_OFF"
-            self.event_queue.put((event_type, "N", data1, data2, received_ns))
-        elif command == 0x80:
-            self.event_queue.put(("MIDI_OFF", "N", data1, data2, received_ns))
-        elif command == 0xB0 and data2 > 0:
-            self.event_queue.put(("MIDI", "CC", data1, data2, received_ns))
-        elif command == 0xC0:
-            self.event_queue.put(("MIDI", "PC", data1, 127, received_ns))
-
-    def close(self):
-        if self.handle:
-            try:
-                winmm.midiInStop(self.handle)
-            except Exception:
-                pass
-            try:
-                winmm.midiInClose(self.handle)
-            except Exception:
-                pass
-            self.handle = None
-
-
-class WinMidiOutput:
-    def __init__(self, device_id):
-        self.device_id = int(device_id)
-        self.handle = ctypes.c_void_p()
-        rc = winmm.midiOutOpen(ctypes.byref(self.handle), self.device_id, 0, 0, 0)
-        if rc != MMSYSERR_NOERROR:
-            raise RuntimeError(f"midiOutOpen rc={rc}")
-
-    @staticmethod
-    def devices():
-        devices = []
-        for device_id in range(winmm.midiOutGetNumDevs()):
-            caps = MIDIOUTCAPS()
-            rc = winmm.midiOutGetDevCapsW(device_id, ctypes.byref(caps), ctypes.sizeof(caps))
-            if rc == MMSYSERR_NOERROR:
-                devices.append((device_id, caps.szPname))
-        return devices
-
-    def send(self, status):
-        if self.handle:
-            rc = winmm.midiOutShortMsg(self.handle, int(status) & 0xFF)
-            if rc != MMSYSERR_NOERROR:
-                raise RuntimeError(f"midiOutShortMsg rc={rc}")
-
-    def close(self):
-        if self.handle:
-            winmm.midiOutClose(self.handle)
-            self.handle = None
 
 
 class DrumPadNative:
@@ -2584,9 +2389,9 @@ class DrumPadNative:
         self.update_display_viewport(self.display_size)
         pygame.display.set_caption("STARRYPAD")
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("Segoe UI", 22)
-        self.small_font = pygame.font.SysFont("Segoe UI", 15)
-        self.big_font = pygame.font.SysFont("Segoe UI", 46, bold=True)
+        self.font = pygame.font.SysFont(UI_FONT_NAME, 22)
+        self.small_font = pygame.font.SysFont(UI_FONT_NAME, 15)
+        self.big_font = pygame.font.SysFont(UI_FONT_NAME, 46, bold=True)
 
     def update_display_viewport(self, size):
         width, height = max(640, int(size[0])), max(500, int(size[1]))
@@ -3358,7 +3163,7 @@ class DrumPadNative:
             sample_worker.join(timeout=10.0)
 
     def midi_devices(self):
-        return [(device_id, name, 0) for device_id, name in WinMidiInput.devices()]
+        return [(device_id, name, 0) for device_id, name in MidiInput.devices()]
 
     def open_preferred_midi(self):
         devices = self.midi_devices()
@@ -3367,10 +3172,13 @@ class DrumPadNative:
             self.log(self.status)
             return False
 
-        exact = [d for d in devices if d[1] == "STARRYPAD MINI"]
-        contains = [d for d in devices if "STARRYPAD" in d[1].upper()]
+        # CoreMIDI splits one USB device into several endpoints, and the vendor
+        # "-Private" port carries editor traffic rather than pad hits.
+        playable = [d for d in devices if "PRIVATE" not in d[1].upper()]
+        exact = [d for d in playable if d[1] == "STARRYPAD MINI"]
+        contains = [d for d in playable if "STARRYPAD" in d[1].upper()]
         ordered = []
-        for group in (exact, contains, devices):
+        for group in (exact, contains, playable, devices):
             for device in group:
                 if device[0] not in [item[0] for item in ordered]:
                     ordered.append(device)
@@ -3388,9 +3196,9 @@ class DrumPadNative:
     def open_midi(self, device_id):
         self.close_midi()
         try:
-            self.midi_input = WinMidiInput(device_id, self.audio_events)
+            self.midi_input = MidiInput(device_id, self.audio_events)
             self.midi_device_id = device_id
-            self.midi_device_name = dict(WinMidiInput.devices()).get(device_id, f"Input {device_id}")
+            self.midi_device_name = dict(MidiInput.devices()).get(device_id, f"Input {device_id}")
             self.preferred_midi_name = self.midi_device_name
             self.midi_disconnect_notified = False
             self.status = f"MIDI: {self.midi_device_name}"
@@ -3421,13 +3229,17 @@ class DrumPadNative:
         self.close_midi_output()
         if not self.clock_output_enabled:
             return False
-        devices = WinMidiOutput.devices()
+        devices = MidiOutput.devices()
         if not devices:
             self.status = "No MIDI output"
             return False
-        selected = next((device for device in devices if device[1] == self.midi_output_name), devices[0])
+        playable = [device for device in devices if "PRIVATE" not in device[1].upper()]
+        selected = next(
+            (device for device in devices if device[1] == self.midi_output_name),
+            (playable or devices)[0],
+        )
         try:
-            self.midi_output = WinMidiOutput(selected[0])
+            self.midi_output = MidiOutput(selected[0])
             self.midi_output_name = selected[1]
             return True
         except Exception as exc:
@@ -3442,7 +3254,7 @@ class DrumPadNative:
         self.midi_output = None
 
     def cycle_midi_output(self):
-        devices = WinMidiOutput.devices()
+        devices = MidiOutput.devices()
         if not devices:
             self.midi_output_name = None
             self.clock_output_enabled = False
@@ -4298,8 +4110,7 @@ class DrumPadNative:
                     self.status = f"Audio scheduler failed: {exc}"
                     self.log(self.status)
         finally:
-            if task_handle:
-                avrt.AvRevertMmThreadCharacteristics(task_handle)
+            release_audio_thread_priority(task_handle)
 
     def scheduler_timeout(self):
         now_ns = time.perf_counter_ns()
@@ -7180,7 +6991,7 @@ class DrumPadNative:
         output_name = self.midi_output_name or "No output selected"
         self.screen.blit(self.small_font.render(output_name[:34], True, value_color), (294, 466))
         self.settings_buttons["sync_port"] = pygame.Rect(648, 458, 100, 34)
-        self.draw_button(self.settings_buttons["sync_port"], "Next port", enabled=bool(WinMidiOutput.devices()))
+        self.draw_button(self.settings_buttons["sync_port"], "Next port", enabled=bool(MidiOutput.devices()))
 
         self.screen.blit(self.small_font.render("Clock offset", True, label_color), (294, 536))
         self.settings_buttons["sync_correction_down"] = pygame.Rect(620, 522, 36, 36)
@@ -7362,7 +7173,7 @@ def main():
         print(f"Fatal error: {exc}", file=sys.stderr)
         raise
     finally:
-        kernel32.CloseHandle(mutex)
+        release_single_instance(mutex)
 
 
 if __name__ == "__main__":
