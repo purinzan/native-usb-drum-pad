@@ -147,6 +147,12 @@ Feedback the panel gives you:
 Fonts are Barlow, Barlow Condensed and IBM Plex Mono, all under the SIL Open
 Font License; the licence texts sit beside them in `assets/fonts/`.
 
+A struck pad glows, and both the brightness and how long it holds scale with
+velocity, so the panel carries dynamics you can see. The Starrypad's own lights
+are not addressable: it exposes exactly two USB interfaces, Audio Control and
+MIDI Streaming, with no HID or vendor interface and no reply to a standard
+device inquiry, so the host has no channel to reach them.
+
 Performance behavior:
 
 - Velocity below 50 remains audible when the controller sends the hit.

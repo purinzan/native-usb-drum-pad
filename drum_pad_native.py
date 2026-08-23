@@ -59,6 +59,8 @@ PERFORMANCE_PHRASE_GAP_SECONDS = 2.0
 MIDI_SILENCE_HINT_SECONDS = 4.0
 PAD_DRAG_THRESHOLD = 10
 PAD_SWAP_FLASH_SECONDS = 0.45
+HIT_FLASH_MIN = 0.075
+HIT_FLASH_RANGE = 0.11
 PAD_GHOST_SCALE = 0.6
 PAD_GHOST_OFFSET = (16, 14)
 PAD_MOVE_DELTAS = {
@@ -1270,6 +1272,7 @@ class DrumPadNative:
         self.performance_lock = threading.Lock()
         self.settings_lock = threading.Lock()
         self.hit_until = [0.0] * len(PADS)
+        self.hit_energy = [0.0] * len(PADS)
         self.last_hit = "--"
         self.last_velocity = "--"
         self.last_velocity_value = 0
@@ -6063,7 +6066,11 @@ class DrumPadNative:
 
         now = time.perf_counter()
         with self.state_lock:
-            self.hit_until[index] = now + 0.095
+            # A harder hit holds longer and glows brighter, so the panel
+            # carries the dynamics the pad LEDs cannot.
+            energy = max(0.0, min(1.0, adjusted_velocity / 127.0))
+            self.hit_energy[index] = energy
+            self.hit_until[index] = now + HIT_FLASH_MIN + HIT_FLASH_RANGE * energy
             self.last_hit = display_name
             self.last_velocity_value = adjusted_velocity
             if midi_note is None:
@@ -6746,7 +6753,12 @@ class DrumPadNative:
         sound, which keeps the layout learnable without spending real colour.
         """
         now = time.perf_counter()
-        for index, rect in self.pad_rects().items():
+        rects = self.pad_rects()
+        for index, rect in rects.items():
+            if now < self.hit_until[index] and not self.pad_mute[index]:
+                self.draw_pad_glow(rect.move(0, 2), self.hit_energy[index])
+
+        for index, rect in rects.items():
             muted = self.pad_mute[index]
             soloed = index in self.solo_pads
             selected = index in self.pad_selection
@@ -6755,7 +6767,10 @@ class DrumPadNative:
             drop_target = index == self.pad_drag_over
             flash = max(0.0, (self.pad_swap_flash.get(index, 0.0) - now) / PAD_SWAP_FLASH_SECONDS)
 
+            energy = self.hit_energy[index] if sounding else 0.0
             face = theme.PAD_HIT if sounding or drop_target else theme.PAD
+            if sounding:
+                face = theme.mix(face, theme.ACCENT_SOFT, 0.35 + 0.55 * energy)
             border = theme.ACCENT if sounding or selected or drop_target else theme.RULE
             if flash:
                 face = theme.mix(face, theme.ACCENT_SOFT, flash)
@@ -6801,6 +6816,22 @@ class DrumPadNative:
                 self.screen.blit(marker, (rect.left + 12, rect.bottom - 14 - marker.get_height()))
 
         self.draw_pad_ghost()
+
+    def draw_pad_glow(self, rect, energy):
+        """Three soft rings outside a struck pad, sized and lit by velocity."""
+        radius = theme.RADIUS["pad"]
+        for step in range(3, 0, -1):
+            spread = round(step * (3 + 5 * energy))
+            alpha = round((30 + 60 * energy) / step)
+            if alpha <= 0:
+                continue
+            halo = rect.inflate(spread * 2, spread * 2)
+            layer = pygame.Surface(halo.size, pygame.SRCALPHA)
+            pygame.draw.rect(
+                layer, (*theme.ACCENT, alpha), layer.get_rect(),
+                border_radius=radius + spread,
+            )
+            self.screen.blit(layer, halo.topleft)
 
     def draw_pad_ghost(self):
         """The dragged pad rides the cursor, so the gesture has something to follow."""
