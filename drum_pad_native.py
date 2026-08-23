@@ -58,6 +58,9 @@ PERFORMANCE_BUFFER_SECONDS = 120.0
 PERFORMANCE_PHRASE_GAP_SECONDS = 2.0
 MIDI_SILENCE_HINT_SECONDS = 4.0
 PAD_DRAG_THRESHOLD = 10
+PAD_SWAP_FLASH_SECONDS = 0.45
+PAD_GHOST_SCALE = 0.6
+PAD_GHOST_OFFSET = (16, 14)
 PAD_MOVE_DELTAS = {
     pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: 4, pygame.K_DOWN: -4,
 }
@@ -769,6 +772,20 @@ for _note, _pad in sorted(GM_NOTE_TO_PAD.items()):
 
 MAPPING_MODES = ("DONNER Mini", "GM Drums", "Learn")
 KIT_ORDER = tuple(KIT)
+# The kit hue belongs to the sound, so it travels when pads are rearranged.
+SYNTH_COLORS = {pad["synth"]: pad["color"] for pad in PADS}
+
+
+def synth_color(synth, fallback):
+    if synth in SYNTH_COLORS:
+        return SYNTH_COLORS[synth]
+    base = max(
+        (name for name in SYNTH_COLORS if str(synth).startswith(name + "_")),
+        key=len, default=None,
+    )
+    return SYNTH_COLORS[base] if base else fallback
+
+
 SYNTH_LABELS = {pad["synth"]: pad["name"] for pad in PADS}
 SYNTH_LABELS.update({
     "snare": "Snare Tight", "snare_warm": "Snare Warm",
@@ -1295,6 +1312,8 @@ class DrumPadNative:
         self.pad_drag_from = None
         self.pad_drag_over = None
         self.pad_drag_origin = None
+        self.pad_drag_active = False
+        self.pad_swap_flash = {}
         self.solo_pads = set()
         self.mixer_bypass = False
         self.mixer_open = False
@@ -4172,6 +4191,9 @@ class DrumPadNative:
                 pattern["source_events"] = swap_event_pads(pattern["source_events"], first, second)
             pattern["event_meta"] = swap_event_meta_pads(pattern["event_meta"], first, second)
 
+        flash_until = time.perf_counter() + PAD_SWAP_FLASH_SECONDS
+        self.pad_swap_flash = {first: flash_until, second: flash_until}
+
         # Either pad may still be sounding its old voice. The derived sound
         # caches key on content rather than pad index, so nothing else to clear.
         self.audio_events.put(("PANIC",))
@@ -4192,6 +4214,7 @@ class DrumPadNative:
         self.pad_drag_from = index
         self.pad_drag_origin = pos
         self.pad_drag_over = None
+        self.pad_drag_active = False
 
     def update_pad_drag(self, pos):
         if self.pad_drag_from is None or self.pad_drag_origin is None:
@@ -4199,7 +4222,8 @@ class DrumPadNative:
         moved = abs(pos[0] - self.pad_drag_origin[0]) + abs(pos[1] - self.pad_drag_origin[1])
         if moved < PAD_DRAG_THRESHOLD:
             return
-        if self.pad_drag_over is None:
+        if not self.pad_drag_active:
+            self.pad_drag_active = True
             self.status = "Drop on another pad to swap the sounds"
         over = next((index for index, rect in self.pad_rects().items() if rect.collidepoint(pos)), None)
         self.pad_drag_over = over if over != self.pad_drag_from else None
@@ -4207,6 +4231,7 @@ class DrumPadNative:
     def finish_pad_drag(self, pos):
         source, target = self.pad_drag_from, self.pad_drag_over
         self.pad_drag_from = self.pad_drag_over = self.pad_drag_origin = None
+        self.pad_drag_active = False
         if source is None or target is None:
             return False
         if self.swap_pads(source, target):
@@ -6698,62 +6723,98 @@ class DrumPadNative:
     def draw_pads(self):
         """Pads are graphite. Colour on a pad means state, never identity.
 
-        The kit hue survives as a 2px stripe so the layout stays learnable, but
-        the accent is reserved for the pad sounding now and the pad selected.
+        One name per pad, and it is the sound: a pad can be holding anything
+        after the kit is rearranged, so the fixed position name would only
+        contradict it. The 2px stripe carries the kit hue and travels with the
+        sound, which keeps the layout learnable without spending real colour.
         """
         now = time.perf_counter()
         for index, rect in self.pad_rects().items():
-            pad = PADS[index]
             muted = self.pad_mute[index]
             soloed = index in self.solo_pads
             selected = index in self.pad_selection
             sounding = now < self.hit_until[index]
-
-            dragging_from = index == self.pad_drag_from and self.pad_drag_over is not None
+            dragging_from = index == self.pad_drag_from and self.pad_drag_active
             drop_target = index == self.pad_drag_over
+            flash = max(0.0, (self.pad_swap_flash.get(index, 0.0) - now) / PAD_SWAP_FLASH_SECONDS)
 
             face = theme.PAD_HIT if sounding or drop_target else theme.PAD
             border = theme.ACCENT if sounding or selected or drop_target else theme.RULE
-            if dragging_from:
-                face, border = theme.mix(theme.PAD, theme.GROUND, 0.5), theme.INK_3
+            if flash:
+                face = theme.mix(face, theme.ACCENT_SOFT, flash)
+                border = theme.mix(border, theme.ACCENT, flash)
             if muted:
                 face, border = theme.dim(face, 0.4), theme.dim(border, 0.6)
+            if dragging_from:
+                face, border = theme.mix(theme.PAD, theme.GROUND, 0.5), theme.INK_3
             if sounding:
                 rect = rect.move(0, 2)
 
             radius = theme.RADIUS["pad"]
             pygame.draw.rect(self.screen, face, rect, border_radius=radius)
-            stripe = pygame.Rect(rect.x + 1, rect.y + 1, rect.width - 2, 2)
-            hue = theme.hue_hint(pad["color"])
-            pygame.draw.rect(self.screen, theme.dim(hue, 0.6) if muted else hue, stripe)
-            edge = 2 if (sounding or selected or drop_target) else 1
+
+            custom_file = self.custom_sample_files[index]
+            has_sample = bool(custom_file and custom_file in self.custom_sound_cache)
+            hue = theme.SIGNAL if has_sample else synth_color(self.pad_synths[index], PADS[index]["color"])
+            hue = theme.hue_hint(hue)
+            if muted or dragging_from:
+                hue = theme.dim(hue, 0.6)
+            pygame.draw.rect(self.screen, hue, pygame.Rect(rect.x + 1, rect.y + 1, rect.width - 2, 2))
+
+            edge = 2 if (sounding or selected or drop_target or flash) else 1
             pygame.draw.rect(self.screen, border, rect, width=edge, border_radius=radius)
+
             if drop_target:
                 # The two-way arrow says swap, not move.
-                icons.draw(self.screen, "swap", pygame.Rect(rect.centerx - 12, rect.centery - 12, 24, 24), theme.ACCENT)
+                icons.draw(self.screen, "swap", pygame.Rect(rect.centerx - 12, rect.top + 18, 24, 24), theme.ACCENT)
 
             name_color = theme.ACCENT if sounding or drop_target else theme.INK if selected else theme.INK_2
             if muted or dragging_from:
                 name_color = theme.INK_3
-            name = self.label_font.render(pad["name"], True, name_color)
-            self.screen.blit(name, (rect.left + 12, rect.top + 14))
-
-            custom_file = self.custom_sample_files[index]
-            has_sample = bool(custom_file and custom_file in self.custom_sound_cache)
-            sound_text = "Sample" if has_sample else SYNTH_LABELS[self.pad_synths[index]]
-            sound = self.fit_text(self.small_font, sound_text, rect.width - 46, theme.INK_3)
-            self.screen.blit(sound, (rect.left + 12, rect.bottom - 12 - sound.get_height()))
+            label = "Sample" if has_sample else SYNTH_LABELS[self.pad_synths[index]]
+            surface = self.fit_text(self.label_font, label, rect.width - 20, name_color)
+            self.screen.blit(surface, surface.get_rect(center=rect.center))
 
             note = PAD_TO_GM_NOTE.get(index)
             if note is not None:
                 number = self.data_font_sm.render(f"{note}", True, theme.INK_3)
                 self.screen.blit(number, (rect.right - 12 - number.get_width(), rect.bottom - 14 - number.get_height()))
-
-            if has_sample:
-                pygame.draw.circle(self.screen, theme.SIGNAL, (rect.right - 15, rect.top + 18), 3)
             if muted or soloed:
                 marker = self.data_font_sm.render("M" if muted else "S", True, theme.INK_2)
-                self.screen.blit(marker, (rect.right - 14 - marker.get_width(), rect.top + 13))
+                self.screen.blit(marker, (rect.left + 12, rect.bottom - 14 - marker.get_height()))
+
+        self.draw_pad_ghost()
+
+    def draw_pad_ghost(self):
+        """The dragged pad rides the cursor, so the gesture has something to follow."""
+        if not self.pad_drag_active or self.pad_drag_from is None:
+            return
+        source = self.pad_drag_from
+        template = self.pad_rects()[source]
+        size = (round(template.width * PAD_GHOST_SCALE), round(template.height * PAD_GHOST_SCALE))
+        ghost = pygame.Surface(size, pygame.SRCALPHA)
+        body = pygame.Rect(0, 0, *size)
+        radius = theme.RADIUS["pad"]
+        pygame.draw.rect(ghost, (*theme.PAD_HIT, 235), body, border_radius=radius)
+
+        custom_file = self.custom_sample_files[source]
+        has_sample = bool(custom_file and custom_file in self.custom_sound_cache)
+        hue = theme.SIGNAL if has_sample else synth_color(self.pad_synths[source], PADS[source]["color"])
+        pygame.draw.rect(ghost, theme.hue_hint(hue), pygame.Rect(1, 1, size[0] - 2, 2))
+        pygame.draw.rect(ghost, theme.ACCENT, body, width=2, border_radius=radius)
+
+        label = "Sample" if has_sample else SYNTH_LABELS[self.pad_synths[source]]
+        surface = self.fit_text(self.label_font, label, size[0] - 12, theme.ACCENT)
+        ghost.blit(surface, surface.get_rect(center=body.center))
+
+        # Offset from the cursor like a drag cursor, so the pad underneath
+        # keeps showing its own name and drop arrow.
+        x = self.mouse_logical[0] + PAD_GHOST_OFFSET[0]
+        y = self.mouse_logical[1] + PAD_GHOST_OFFSET[1]
+        x = min(x, WINDOW_SIZE[0] - size[0] - 4)
+        y = min(y, WINDOW_SIZE[1] - size[1] - 4)
+        self.screen.blit(ghost, (x, y))
+
     def draw_side_panel(self):
         """One panel, four labelled sections. Rules and labels replace nested cards."""
         panel = pygame.Rect(700, 74, 316, 604)
