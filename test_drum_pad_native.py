@@ -781,6 +781,77 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class PadBankTests(unittest.TestCase):
+    """Sixteen pads, four banks of sounds behind them."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+
+    def test_a_slot_is_a_bank_and_a_pad(self):
+        app = self.app
+        self.assertEqual(app.slot(0), 0)
+        app.pad_bank = 2
+        self.assertEqual(app.slot(0), 32)
+        self.assertEqual(app.pad_of(32), 0)
+        self.assertEqual(app.bank_of(32), 2)
+        self.assertEqual(drum.pad_profile(32)["name"], drum.PADS[0]["name"])
+
+    def test_banks_hold_different_sounds(self):
+        app = self.app
+        app.pad_synths[app.slot(0)] = "clap"
+        self.assertTrue(app.select_bank(2))
+        self.assertNotEqual(app.pad_synths[app.slot(0)], "clap")
+        app.pad_synths[app.slot(0)] = "cowbell"
+        app.select_bank(0)
+        self.assertEqual(app.pad_synths[app.slot(0)], "clap")
+
+    def test_switching_bank_keeps_you_on_the_same_pad(self):
+        app = self.app
+        app.selected_pad = app.slot(6)
+        app.select_bank(3)
+        self.assertEqual(app.pad_of(app.selected_pad), 6)
+        self.assertEqual(app.bank_of(app.selected_pad), 3)
+        self.assertEqual(app.pad_selection, {app.selected_pad})
+
+    def test_a_bank_switch_to_the_same_bank_is_refused(self):
+        self.assertFalse(self.app.select_bank(0))
+        self.assertFalse(self.app.select_bank(9))
+
+    def test_the_rubber_keeps_its_own_response(self):
+        """Sensitivity and calibration are per pad, not per bank."""
+        app = self.app
+        self.assertEqual(len(app.pad_sensitivity), drum.PAD_COUNT)
+        self.assertEqual(len(app.pad_calibrations), drum.PAD_COUNT)
+        self.assertEqual(len(app.pad_synths), drum.PAD_SLOTS)
+        app.selected_pad = app.slot(3)
+        app.adjust_pad_sensitivity(0.1)
+        tuned = app.pad_sensitivity[3]
+        app.select_bank(1)
+        app.selected_pad = app.slot(3)
+        self.assertEqual(app.pad_sensitivity[3], tuned)
+
+    def test_a_hit_plays_the_slot_for_the_current_bank(self):
+        app = self.app
+        app.play_pad = mock.Mock()
+        app.handle_midi_trigger("N", 36, 100, time.perf_counter_ns())
+        self.assertEqual(app.play_pad.call_args[0][0], 0)
+        app.select_bank(2)
+        app.handle_midi_trigger("N", 36, 100, time.perf_counter_ns() + 500_000_000)
+        self.assertEqual(app.play_pad.call_args[0][0], 32)
+
+    def test_a_project_saved_before_banks_grows_to_four(self):
+        app = self.app
+        legacy = app.default_kit_profile()
+        for key in ("pad_synths", "custom_samples", "pad_volume", "pad_mute"):
+            legacy[key] = legacy[key][:drum.PAD_COUNT]
+        legacy["pad_synths"][0] = "clap"
+        grown = app.sanitize_kit_profile(legacy)
+        self.assertEqual(len(grown["pad_synths"]), drum.PAD_SLOTS)
+        # Bank A keeps what was saved; the rest take the shipped defaults.
+        self.assertEqual(grown["pad_synths"][0], "clap")
+        self.assertEqual(grown["pad_synths"][drum.PAD_COUNT], drum.DEFAULT_PAD_SYNTHS[0])
+
+
 class MainScreenTests(unittest.TestCase):
     """The controls the MPC-style surface added."""
 
@@ -944,14 +1015,19 @@ class KitBTests(unittest.TestCase):
         with mock.patch.object(pygame.key, "get_mods", return_value=0):
             self.assertTrue(app.handle_key(pygame.K_k))
         self.assertEqual(app.active_kit, "B")
-        self.assertEqual(app.pad_synths, list(drum.KIT_B_PAD_SYNTHS))
+        self.assertEqual(app.pad_synths[:drum.PAD_COUNT], list(drum.KIT_B_PAD_SYNTHS))
+        # Every bank is loaded, so no bank is silent when you switch to it.
+        self.assertEqual(len(app.pad_synths), drum.PAD_SLOTS)
+        self.assertEqual(app.pad_synths[drum.PAD_COUNT:drum.PAD_COUNT * 2], list(drum.KIT_B_PAD_SYNTHS))
         # switch_kit only logged before, so the change was invisible on screen.
         self.assertIn("808 Glass", app.status)
 
     def test_a_new_session_starts_with_the_shipped_kits(self):
         app = drum.DrumPadNative(settings_path=None)
-        self.assertEqual(app.kit_slots["A"]["pad_synths"], list(drum.DEFAULT_PAD_SYNTHS))
-        self.assertEqual(app.kit_slots["B"]["pad_synths"], list(drum.KIT_B_PAD_SYNTHS))
+        self.assertEqual(app.kit_slots["A"]["pad_synths"], drum.default_slot_synths())
+        self.assertEqual(
+            app.kit_slots["B"]["pad_synths"], drum.default_slot_synths(drum.KIT_B_PAD_SYNTHS)
+        )
 
     def test_an_untouched_slot_in_an_old_project_picks_up_its_shipped_kit(self):
         app = drum.DrumPadNative(settings_path=None)
@@ -963,8 +1039,10 @@ class KitBTests(unittest.TestCase):
 
         app.apply_project_data(json.loads(json.dumps(payload)))
 
-        self.assertEqual(app.kit_slots["B"]["pad_synths"], list(drum.KIT_B_PAD_SYNTHS))
-        self.assertEqual(app.kit_slots["A"]["pad_synths"], list(drum.DEFAULT_PAD_SYNTHS))
+        self.assertEqual(
+            app.kit_slots["B"]["pad_synths"], drum.default_slot_synths(drum.KIT_B_PAD_SYNTHS)
+        )
+        self.assertEqual(app.kit_slots["A"]["pad_synths"], drum.default_slot_synths())
         # An edited slot is never overwritten by a newer factory kit.
         self.assertEqual(app.kit_slots["C"]["pad_synths"][0], "clap")
 

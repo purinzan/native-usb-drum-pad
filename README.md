@@ -165,7 +165,6 @@ They are listed because knowing what is absent is worth more than discovering it
 
 | | Why it is not here |
 | --- | --- |
-| Pad banks A-D (64 pads) | Every per-pad list is 16 long. Widening them to 64 with a bank offset touches triggering, kit profiles, recorded events and persistence at once. |
 | Multiple tracks | The app plays one part. Tracks need their own routing, mute and solo, and a mixer that knows about them. |
 | GRID note editor | Step Seq covers rhythm on a grid; a piano-roll style editor with note length and drag is a screen that does not exist yet. |
 | Per-pad sample layers | Velocity layers are defined in the kit rather than being editable per pad. |

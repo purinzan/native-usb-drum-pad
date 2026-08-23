@@ -879,8 +879,27 @@ TIMBRE_FAMILIES = (
 HAT_OPEN_PAIRS = dict(zip(TIMBRE_FAMILIES[1], TIMBRE_FAMILIES[2]))
 DEFAULT_PAD_SYNTHS = tuple(pad["synth"] for pad in PADS)
 
+# Sixteen physical pads, four banks of sounds behind them. A "slot" is an
+# absolute index 0-63; a "pad" is the piece of rubber, 0-15. Anything describing
+# a sound is stored per slot, anything describing how hard the rubber has to be
+# hit is stored per pad.
+PAD_COUNT = len(PADS)
+PAD_BANKS = ("A", "B", "C", "D")
+PAD_SLOTS = PAD_COUNT * len(PAD_BANKS)
+
+
+def pad_profile(slot):
+    """The physical pad a slot sits on: its name and its kit colour."""
+    return PADS[int(slot) % PAD_COUNT]
+
 # Kit B: the 808 core where the acoustic kit has its drums, glass where it has
 # its cymbals and hand percussion.
+def default_slot_synths(base=None):
+    """Every bank starts with the kit loaded, so no bank is silent."""
+    base = tuple(base or DEFAULT_PAD_SYNTHS)
+    return list(base) * len(PAD_BANKS)
+
+
 KIT_B_PAD_SYNTHS = (
     "kick8_long", "snare8", "hat8", "openhat8",
     "lowtom8", "midtom8", "hitom8", "conga8",
@@ -1366,8 +1385,8 @@ class DrumPadNative:
         self.loop_lock = threading.RLock()
         self.performance_lock = threading.Lock()
         self.settings_lock = threading.Lock()
-        self.hit_until = [0.0] * len(PADS)
-        self.hit_energy = [0.0] * len(PADS)
+        self.hit_until = [0.0] * PAD_SLOTS
+        self.hit_energy = [0.0] * PAD_SLOTS
         self.last_hit = "--"
         self.last_velocity = "--"
         self.last_velocity_value = 0
@@ -1393,16 +1412,16 @@ class DrumPadNative:
         self.project_redo = collections.deque(maxlen=20)
         self.active_kit = "A"
         self.kit_slots = {slot: self.factory_kit_profile(slot) for slot in KIT_SLOTS}
-        self.pad_synths = list(DEFAULT_PAD_SYNTHS)
+        self.pad_synths = list(default_slot_synths())
         self.pad_sensitivity = [1.0] * len(PADS)
-        self.pad_volume = [1.0] * len(PADS)
-        self.pad_pan = [0.0] * len(PADS)
-        self.pad_tune = [0] * len(PADS)
-        self.pad_mute = [False] * len(PADS)
-        self.pad_punch = [0] * len(PADS)
-        self.pad_air = [0] * len(PADS)
-        self.pad_space = [0] * len(PADS)
-        self.pad_bus = [0] * len(PADS)
+        self.pad_volume = [1.0] * PAD_SLOTS
+        self.pad_pan = [0.0] * PAD_SLOTS
+        self.pad_tune = [0] * PAD_SLOTS
+        self.pad_mute = [False] * PAD_SLOTS
+        self.pad_punch = [0] * PAD_SLOTS
+        self.pad_air = [0] * PAD_SLOTS
+        self.pad_space = [0] * PAD_SLOTS
+        self.pad_bus = [0] * PAD_SLOTS
         self.pad_selection = {0}
         self.pad_drag_from = None
         self.pad_drag_over = None
@@ -1410,6 +1429,7 @@ class DrumPadNative:
         self.pad_drag_active = False
         self.pad_swap_flash = {}
         self.pattern_page = 0
+        self.pad_bank = 0
         self.note_repeat_latch = False
         self.full_level = False
         self.metronome_level = 70
@@ -1446,8 +1466,8 @@ class DrumPadNative:
         self.calibration_duplicate_ms = []
         self.calibration_last_raw_ns = None
         self.calibration_prompted = False
-        self.custom_sample_files = [None] * len(PADS)
-        self.sample_edits = [default_sample_edit() for _ in PADS]
+        self.custom_sample_files = [None] * PAD_SLOTS
+        self.sample_edits = [default_sample_edit() for _ in range(PAD_SLOTS)]
         self.custom_sound_cache = {}
         self.edited_sound_cache = {}
         self.sample_channels = {}
@@ -1576,24 +1596,24 @@ class DrumPadNative:
     def factory_kit_profile(slot):
         """The shipped contents of one kit slot."""
         profile = DrumPadNative.default_kit_profile()
-        profile["pad_synths"] = list(FACTORY_KIT_SYNTHS.get(slot, DEFAULT_PAD_SYNTHS))
+        profile["pad_synths"] = default_slot_synths(FACTORY_KIT_SYNTHS.get(slot, DEFAULT_PAD_SYNTHS))
         return profile
 
     @staticmethod
     def default_kit_profile():
         return {
-            "pad_synths": list(DEFAULT_PAD_SYNTHS),
-            "pad_sensitivity": [1.0] * len(PADS),
-            "custom_samples": [None] * len(PADS),
-            "sample_edits": [default_sample_edit() for _ in PADS],
-            "pad_volume": [1.0] * len(PADS),
-            "pad_pan": [0.0] * len(PADS),
-            "pad_tune": [0] * len(PADS),
-            "pad_mute": [False] * len(PADS),
-            "pad_punch": [0] * len(PADS),
-            "pad_air": [0] * len(PADS),
-            "pad_space": [0] * len(PADS),
-            "pad_bus": [0] * len(PADS),
+            "pad_synths": default_slot_synths(),
+            "pad_sensitivity": [1.0] * PAD_COUNT,
+            "custom_samples": [None] * PAD_SLOTS,
+            "sample_edits": [default_sample_edit() for _ in range(PAD_SLOTS)],
+            "pad_volume": [1.0] * PAD_SLOTS,
+            "pad_pan": [0.0] * PAD_SLOTS,
+            "pad_tune": [0] * PAD_SLOTS,
+            "pad_mute": [False] * PAD_SLOTS,
+            "pad_punch": [0] * PAD_SLOTS,
+            "pad_air": [0] * PAD_SLOTS,
+            "pad_space": [0] * PAD_SLOTS,
+            "pad_bus": [0] * PAD_SLOTS,
         }
 
     @staticmethod
@@ -1601,14 +1621,24 @@ class DrumPadNative:
         fallback = DrumPadNative.default_kit_profile()
         if not isinstance(profile, dict):
             return fallback
+        profile = dict(profile)
+        for key in ("pad_synths", "custom_samples", "sample_edits", "pad_volume",
+                    "pad_pan", "pad_tune", "pad_mute", "pad_punch", "pad_air",
+                    "pad_space", "pad_bus"):
+            value = profile.get(key)
+            if isinstance(value, list) and len(value) == PAD_COUNT:
+                # One bank saved before banks existed: bank A keeps it, the rest
+                # take the shipped defaults so nothing is silent.
+                profile[key] = list(value) + fallback[key][PAD_COUNT:]
 
         synths = profile.get("pad_synths", fallback["pad_synths"])
-        if not isinstance(synths, list) or len(synths) != len(PADS):
+        if not isinstance(synths, list) or len(synths) != PAD_SLOTS:
             synths = fallback["pad_synths"]
-        synths = [synth if synth in KIT else DEFAULT_PAD_SYNTHS[index] for index, synth in enumerate(synths)]
+        defaults = default_slot_synths()
+        synths = [synth if synth in KIT else defaults[index] for index, synth in enumerate(synths)]
 
         sensitivity = profile.get("pad_sensitivity", fallback["pad_sensitivity"])
-        if not isinstance(sensitivity, list) or len(sensitivity) != len(PADS):
+        if not isinstance(sensitivity, list) or len(sensitivity) != PAD_COUNT:
             sensitivity = fallback["pad_sensitivity"]
         try:
             sensitivity = [clamp_sensitivity(value) for value in sensitivity]
@@ -1616,7 +1646,7 @@ class DrumPadNative:
             sensitivity = fallback["pad_sensitivity"]
 
         custom_samples = profile.get("custom_samples", fallback["custom_samples"])
-        if not isinstance(custom_samples, list) or len(custom_samples) != len(PADS):
+        if not isinstance(custom_samples, list) or len(custom_samples) != PAD_SLOTS:
             custom_samples = fallback["custom_samples"]
         custom_samples = [
             value
@@ -1627,13 +1657,13 @@ class DrumPadNative:
             for value in custom_samples
         ]
         sample_edits = profile.get("sample_edits", fallback["sample_edits"])
-        if not isinstance(sample_edits, list) or len(sample_edits) != len(PADS):
+        if not isinstance(sample_edits, list) or len(sample_edits) != PAD_SLOTS:
             sample_edits = fallback["sample_edits"]
         sample_edits = [sanitize_sample_edit(value) for value in sample_edits]
 
         def sanitize_list(name, transform):
             values = profile.get(name, fallback[name])
-            if not isinstance(values, list) or len(values) != len(PADS):
+            if not isinstance(values, list) or len(values) != PAD_SLOTS:
                 return list(fallback[name])
             try:
                 return [transform(value) for value in values]
@@ -2283,7 +2313,7 @@ class DrumPadNative:
         current_index = KIT_SLOTS.index(self.active_kit)
         self.active_kit = KIT_SLOTS[(current_index + 1) % len(KIT_SLOTS)]
         self.apply_kit_profile(self.kit_slots[self.active_kit])
-        self.prewarm_pad_tuning(range(len(PADS)))
+        self.prewarm_pad_tuning(self.slot(pad) for pad in range(PAD_COUNT))
         self.solo_pads.clear()
         self.mixer_bypass = False
         self.pad_selection = {self.selected_pad}
@@ -2293,10 +2323,10 @@ class DrumPadNative:
 
     def adjust_pad_sensitivity(self, amount):
         self.push_project_history()
-        index = self.selected_pad
-        self.pad_sensitivity[index] = clamp_sensitivity(self.pad_sensitivity[index] + amount)
+        pad = self.pad_of(self.selected_pad)
+        self.pad_sensitivity[pad] = clamp_sensitivity(self.pad_sensitivity[pad] + amount)
         self.persist_settings()
-        self.log(f"Pad {index + 1} sensitivity {int(self.pad_sensitivity[index] * 100)}%")
+        self.log(f"Pad {pad + 1} sensitivity {int(self.pad_sensitivity[pad] * 100)}%")
 
     def mixer_targets(self):
         return sorted(self.pad_selection or {self.selected_pad})
@@ -2848,7 +2878,7 @@ class DrumPadNative:
             self.status = f"Loaded {len(self.samples)} samples"
             self.log(self.status)
         self.load_custom_samples()
-        self.prewarm_pad_tuning(range(len(PADS)))
+        self.prewarm_pad_tuning(self.slot(pad) for pad in range(PAD_COUNT))
 
     def prewarm_pad_tuning(self, pad_indices):
         for index in pad_indices:
@@ -4008,7 +4038,7 @@ class DrumPadNative:
                 elif name == "mixer_undo":
                     self.undo_project_edit()
                 elif name == "mixer_all":
-                    self.pad_selection = set(range(len(PADS)))
+                    self.pad_selection = {self.slot(pad) for pad in range(PAD_COUNT)}
                 return
             return
 
@@ -4264,6 +4294,8 @@ class DrumPadNative:
                     self.tap_tempo()
                 elif name.startswith("tab_"):
                     self.select_tab(name.removeprefix("tab_"))
+                elif name.startswith("bank_") and name.removeprefix("bank_").isdigit():
+                    self.select_bank(int(name.removeprefix("bank_")))
                 elif name.startswith("kit_") and name.removeprefix("kit_") in KIT_SLOTS:
                     self.select_kit(name.removeprefix("kit_"))
                 elif name == "kit_browse":
@@ -4345,8 +4377,9 @@ class DrumPadNative:
                     return
             return
 
-        for index, rect in self.pad_rects().items():
+        for pad, rect in self.pad_rects().items():
             if rect.collidepoint(pos):
+                index = self.slot(pad)
                 self.selected_pad = index
                 if modifiers & pygame.KMOD_SHIFT:
                     if index in self.pad_selection and len(self.pad_selection) > 1:
@@ -4380,7 +4413,7 @@ class DrumPadNative:
         if name == "metronome":
             return "Metro level", self.metronome_level, f"{self.metronome_level}", 1
         if name == "sensitivity":
-            percent = round((self.pad_sensitivity[index] - 0.6) * 100)
+            percent = round((self.pad_sensitivity[self.pad_of(index)] - 0.6) * 100)
             return "Sensitivity", percent, f"{percent}", 1
         if name == "pad_level":
             percent = round(self.pad_volume[index] * 100)
@@ -4423,6 +4456,32 @@ class DrumPadNative:
             self.status = f"Value: {self.value_spec(name)[0]}"
             return True
         return False
+
+    def slot(self, pad):
+        """Absolute sound slot for a physical pad in the current bank."""
+        return self.pad_bank * PAD_COUNT + int(pad) % PAD_COUNT
+
+    @staticmethod
+    def pad_of(slot):
+        """The physical pad a slot plays on."""
+        return int(slot) % PAD_COUNT
+
+    def bank_of(self, slot):
+        return int(slot) // PAD_COUNT
+
+    def select_bank(self, bank):
+        """Switch banks and carry the selection to the same pad in the new one."""
+        bank = int(bank)
+        if not 0 <= bank < len(PAD_BANKS) or bank == self.pad_bank:
+            return False
+        pad = self.pad_of(self.selected_pad)
+        self.pad_bank = bank
+        self.selected_pad = self.slot(pad)
+        self.pad_selection = {self.selected_pad}
+        self.prewarm_pad_tuning(self.slot(pad) for pad in range(PAD_COUNT))
+        self.status = f"Pad bank {PAD_BANKS[bank]}"
+        self.persist_settings_async()
+        return True
 
     def select_tab(self, name):
         if name not in MAIN_TABS:
@@ -6154,9 +6213,11 @@ class DrumPadNative:
             with self.metrics_lock:
                 self.ignored_event_count += 1
             return
+        pad = index
+        index = self.slot(pad)
 
         now_ns = received_ns or time.perf_counter_ns()
-        if self.calibration_active and index == self.calibration_pad:
+        if self.calibration_active and pad == self.calibration_pad:
             if self.calibration_last_raw_ns is not None:
                 raw_interval_ms = (now_ns - self.calibration_last_raw_ns) / 1_000_000.0
                 if 0 < raw_interval_ms < 35:
@@ -6166,13 +6227,13 @@ class DrumPadNative:
                         self.ignored_event_count += 1
                     return
             self.calibration_last_raw_ns = now_ns
-        dead_time_ns = self.pad_calibrations[index]["dead_time_ms"] * 1_000_000
-        if dead_time_ns and now_ns - self.last_pad_trigger_ns[index] < dead_time_ns:
+        dead_time_ns = self.pad_calibrations[pad]["dead_time_ms"] * 1_000_000
+        if dead_time_ns and now_ns - self.last_pad_trigger_ns[pad] < dead_time_ns:
             with self.metrics_lock:
                 self.ignored_event_count += 1
             return
-        self.last_pad_trigger_ns[index] = now_ns
-        self.collect_calibration_hit(index, velocity)
+        self.last_pad_trigger_ns[pad] = now_ns
+        self.collect_calibration_hit(pad, velocity)
         self.add_sequence_step_from_pad(index, velocity, now_ns)
 
         self.record_performance_hit(index, velocity, received_ns)
@@ -6330,7 +6391,7 @@ class DrumPadNative:
         return p95, p99, hit_count, ignored, errors, queue_depth
 
     def play_pad(self, index, velocity, midi_note):
-        if index < 0 or index >= len(PADS):
+        if index < 0 or index >= PAD_SLOTS:
             return
 
         synth = self.pad_synths[index]
@@ -6343,10 +6404,11 @@ class DrumPadNative:
             elif self.hat_openness >= 0.25:
                 synth = "hat_semi"
         display_name = "Sample" if custom_sound else SYNTH_LABELS[synth]
-        mapped_velocity = calibrated_velocity(velocity, self.pad_calibrations[index])
+        pad = self.pad_of(index)
+        mapped_velocity = calibrated_velocity(velocity, self.pad_calibrations[pad])
         adjusted_velocity = max(
             1,
-            min(127, round(mapped_velocity * self.pad_sensitivity[index])),
+            min(127, round(mapped_velocity * self.pad_sensitivity[pad])),
         )
         curved = velocity_gain(adjusted_velocity)
         audible = not self.pad_mute[index] and (not self.solo_pads or index in self.solo_pads)
@@ -6810,9 +6872,10 @@ class DrumPadNative:
             events = list(self.loop_events)
             selection = set(self.sequence_selection)
         page_start = self.sequence_bar_page * 4.0
-        for pad_index in range(len(PADS)):
-            y = grid_top + pad_index * row_height
-            label = self.small_font.render(PADS[pad_index]["name"], True, theme.INK_2)
+        for pad in range(PAD_COUNT):
+            pad_index = self.slot(pad)
+            y = grid_top + pad * row_height
+            label = self.small_font.render(SYNTH_LABELS[self.pad_synths[pad_index]], True, theme.INK_2)
             self.screen.blit(label, (34, y + 8))
             for step in range(16):
                 x0 = round(grid_left + step * cell_width)
@@ -6824,7 +6887,7 @@ class DrumPadNative:
                 cell_events = [event for event in events if event[1] == pad_index and beat_start <= event[0] < beat_end]
                 if cell_events:
                     velocity = max(event[2] for event in cell_events)
-                    base = PADS[pad_index]["color"]
+                    base = synth_color(self.pad_synths[pad_index], pad_profile(pad_index)["color"])
                     ratio = 0.4 + 0.6 * velocity / 127.0
                     fill = tuple(max(0, min(255, round(component * ratio))) for component in base)
                 else:
@@ -7110,11 +7173,13 @@ class DrumPadNative:
         """
         now = time.perf_counter()
         rects = self.pad_rects()
-        for index, rect in rects.items():
+        for pad, rect in rects.items():
+            index = self.slot(pad)
             if now < self.hit_until[index] and not self.pad_mute[index]:
                 self.draw_pad_glow(rect.move(0, 2), self.hit_energy[index])
 
-        for index, rect in rects.items():
+        for pad, rect in rects.items():
+            index = self.slot(pad)
             muted = self.pad_mute[index]
             soloed = index in self.solo_pads
             selected = index in self.pad_selection
@@ -7143,7 +7208,7 @@ class DrumPadNative:
 
             custom_file = self.custom_sample_files[index]
             has_sample = bool(custom_file and custom_file in self.custom_sound_cache)
-            hue = theme.SIGNAL if has_sample else synth_color(self.pad_synths[index], PADS[index]["color"])
+            hue = theme.SIGNAL if has_sample else synth_color(self.pad_synths[index], pad_profile(index)["color"])
             hue = theme.hue_hint(hue)
             if muted or dragging_from:
                 hue = theme.dim(hue, 0.6)
@@ -7163,7 +7228,7 @@ class DrumPadNative:
             surface = self.fit_text(self.pad_font, label, rect.width - 16, name_color)
             self.screen.blit(surface, surface.get_rect(center=rect.center))
 
-            note = PAD_TO_GM_NOTE.get(index)
+            note = PAD_TO_GM_NOTE.get(pad)
             if note is not None:
                 number = self.data_font_sm.render(f"{note}", True, theme.INK_3)
                 self.screen.blit(number, (rect.right - 12 - number.get_width(), rect.bottom - 14 - number.get_height()))
@@ -7171,6 +7236,8 @@ class DrumPadNative:
                 marker = self.data_font_sm.render("M" if muted else "S", True, theme.INK_2)
                 self.screen.blit(marker, (rect.left + 12, rect.bottom - 14 - marker.get_height()))
 
+        caption = self.label_font.render(f"Pad bank {PAD_BANKS[self.pad_bank]}", True, theme.INK_3)
+        self.screen.blit(caption, (178 + (4 * 118 + 3 * 6 - caption.get_width()) // 2, 594))
         self.draw_pad_ghost()
 
     def draw_pad_glow(self, rect, energy):
@@ -7194,7 +7261,7 @@ class DrumPadNative:
         if not self.pad_drag_active or self.pad_drag_from is None:
             return
         source = self.pad_drag_from
-        template = self.pad_rects()[source]
+        template = self.pad_rects()[self.pad_of(source)]
         size = (round(template.width * PAD_GHOST_SCALE), round(template.height * PAD_GHOST_SCALE))
         ghost = pygame.Surface(size, pygame.SRCALPHA)
         body = pygame.Rect(0, 0, *size)
@@ -7203,7 +7270,7 @@ class DrumPadNative:
 
         custom_file = self.custom_sample_files[source]
         has_sample = bool(custom_file and custom_file in self.custom_sound_cache)
-        hue = theme.SIGNAL if has_sample else synth_color(self.pad_synths[source], PADS[source]["color"])
+        hue = theme.SIGNAL if has_sample else synth_color(self.pad_synths[source], pad_profile(source)["color"])
         pygame.draw.rect(ghost, theme.hue_hint(hue), pygame.Rect(1, 1, size[0] - 2, 2))
         pygame.draw.rect(ghost, theme.ACCENT, body, width=2, border_radius=radius)
 
@@ -7332,7 +7399,7 @@ class DrumPadNative:
         label = "Sample" if custom else SYNTH_LABELS[self.pad_synths[index]]
         self.screen.blit(self.fit_text(self.font, label, rect.width, theme.INK), (rect.x, y))
 
-        note = PAD_TO_GM_NOTE.get(index)
+        note = PAD_TO_GM_NOTE.get(self.pad_of(index))
         self.screen.blit(self.label_font.render("Note", True, theme.INK_3), (rect.x, y + 30))
         self.screen.blit(
             self.data_font.render(str(note) if note is not None else "--", True, theme.INK_2),
@@ -7449,21 +7516,27 @@ class DrumPadNative:
         self.draw_button(self.buttons["latch_on"], "On", danger=self.note_repeat_latch)
         self.draw_button(self.buttons["latch_off"], "Off", active=not self.note_repeat_latch)
 
-        self.screen.blit(self.label_font.render("Kit", True, theme.INK_3), (x0, 280))
+        self.screen.blit(self.label_font.render("Pad bank", True, theme.INK_3), (x0, 278))
+        for column, bank in enumerate(PAD_BANKS):
+            rect = pygame.Rect(x0 + column * 32, 298, 28, 30)
+            self.buttons[f"bank_{column}"] = rect
+            self.draw_button(rect, bank, active=column == self.pad_bank)
+
+        self.screen.blit(self.label_font.render("Kit", True, theme.INK_3), (x0, 340))
         for column, slot in enumerate(KIT_SLOTS):
-            rect = pygame.Rect(x0 + column * 32, 300, 28, 30)
+            rect = pygame.Rect(x0 + column * 32, 360, 28, 30)
             self.buttons[f"kit_{slot}"] = rect
             self.draw_button(rect, slot, active=slot == self.active_kit)
 
-        self.buttons["full_level"] = pygame.Rect(x0, 372, width, 40)
+        self.buttons["full_level"] = pygame.Rect(x0, 406, width, 38)
         self.draw_button(self.buttons["full_level"], "Full Level", danger=self.full_level)
 
-        self.screen.blit(self.label_font.render("Selected pad", True, theme.INK_3), (x0, 440))
+        self.screen.blit(self.label_font.render("Selected pad", True, theme.INK_3), (x0, 458))
         index = self.selected_pad
-        name = self.fit_text(self.font, PADS[index]["name"], width, theme.INK)
-        self.screen.blit(name, (x0, 458))
-        self.buttons["pad_mute"] = pygame.Rect(x0, 490, 58, 30)
-        self.buttons["pad_solo"] = pygame.Rect(x0 + 66, 490, 58, 30)
+        title = f"{PAD_BANKS[self.bank_of(index)]}{self.pad_of(index) + 1}  {pad_profile(index)['name']}"
+        self.screen.blit(self.fit_text(self.font, title, width, theme.INK), (x0, 476))
+        self.buttons["pad_mute"] = pygame.Rect(x0, 504, 58, 30)
+        self.buttons["pad_solo"] = pygame.Rect(x0 + 66, 504, 58, 30)
         self.draw_button(self.buttons["pad_mute"], "Mute", danger=self.pad_mute[index])
         self.draw_button(self.buttons["pad_solo"], "Solo", active=index in self.solo_pads)
 
