@@ -123,7 +123,12 @@ Controls:
   tempo, and Chop opens so the next move is spreading those bars across the
   pads. `Edit` moves the region through the rest of the song.
 - `Edit` opens a non-destructive waveform editor for crop, zoom, normalize, reverse, fades, tune, A/B, and One-shot/Gate/Toggle/Loop playback.
-- `Chop` splits a sample by transients, equal divisions, manual waveform marks, or live pad taps and expands it across available pads with optional play-through and choke behavior.
+- `Chop` treats the waveform as the control surface. Drag to place a cut and it
+  follows the cursor; drag a handle to move that cut, click a handle to remove
+  it, click anywhere else to hear the slice you clicked in. Touching a Transient
+  or Equal chop takes its cuts over by hand rather than discarding them, so an
+  automatic chop is a starting point. Cuts cannot cross each other. It also
+  splits by transients, equal divisions, or live pad taps and expands it across available pads with optional play-through and choke behavior.
 - Sample tempo detection includes Half/Double correction and either Repitch or pitch-preserving WSOLA Stretch that follows the project BPM.
 - `Browse` keeps the pads visible while filtering built-in and user sounds by type, kit, favorites, recents, or search; preview is non-destructive and missing files can be batch relinked from one folder.
 - MIDI Sync supports Auto/Internal/External clock source, 24 PPQN clock in/out, Start/Continue/Stop, output-port selection, and timing offset; external BPM is locked on the performance surface.
