@@ -36,6 +36,39 @@ RADIUS = {"pad": 6, "panel": 7, "button": 5, "field": 5}
 LABEL_TRACKING = 1.6
 
 
+# The accent is the only colour the panel spends on "now", so it is the one
+# worth letting people choose. Each entry rebuilds its own wash and ink.
+ACCENT_CHOICES = (
+    ("Amber", (233, 162, 74)),
+    ("Ember", (232, 106, 74)),
+    ("Rose", (232, 98, 143)),
+    ("Violet", (169, 140, 240)),
+    ("Cyan", (74, 192, 233)),
+    ("Lime", (168, 209, 74)),
+)
+ACCENT_NAMES = tuple(name for name, _rgb in ACCENT_CHOICES)
+DEFAULT_ACCENT = ACCENT_NAMES[0]
+
+
+def relative_luminance(color):
+    red, green, blue = (channel / 255.0 for channel in color)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def set_accent(name):
+    """Point ACCENT, its wash and its ink at one of the named choices.
+
+    Everything draws through `theme.ACCENT` rather than importing the value, so
+    rebinding here reaches the next frame.
+    """
+    global ACCENT, ACCENT_SOFT, ON_ACCENT
+    lookup = dict(ACCENT_CHOICES)
+    ACCENT = lookup.get(name, lookup[DEFAULT_ACCENT])
+    ACCENT_SOFT = mix(GROUND, ACCENT, 0.18)
+    ON_ACCENT = (24, 19, 18) if relative_luminance(ACCENT) > 0.45 else (237, 239, 236)
+    return ACCENT
+
+
 def mix(base, other, amount):
     """Blend `other` into `base`; amount 0.0 keeps base, 1.0 returns other."""
     amount = max(0.0, min(1.0, float(amount)))
