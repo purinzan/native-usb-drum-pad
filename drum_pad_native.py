@@ -1718,6 +1718,7 @@ class DrumPadNative:
         self.sequence_step_cursor = 0
         self.loop_event_meta = {}
         self.loop_cycle_index = 0
+        self.loop_repeat = True
         self.patterns = [None] * PATTERN_COUNT
         self.active_pattern = 0
         self.pending_pattern = None
@@ -1888,6 +1889,7 @@ class DrumPadNative:
         self.repeat_rate = repeat_rate if repeat_rate in REPEAT_RATES else "1/16"
         self.bpm = max(BPM_MIN, min(BPM_MAX, int(data.get("bpm", 120))))
         self.metronome_enabled = bool(data.get("metronome_enabled", False))
+        self.loop_repeat = bool(data.get("loop_repeat", True))
         try:
             self.velocity_floor = max(1, min(120, int(data.get("velocity_floor", 1))))
         except (TypeError, ValueError):
@@ -2000,6 +2002,7 @@ class DrumPadNative:
             "repeat_rate": self.repeat_rate,
             "metronome_enabled": self.metronome_enabled,
             "velocity_floor": self.velocity_floor,
+            "loop_repeat": self.loop_repeat,
             "record_start_mode": self.record_start_mode,
             "sample_input_name": self.sample_input_name,
             "sample_start_mode": self.sample_start_mode,
@@ -4705,6 +4708,8 @@ class DrumPadNative:
                     self.request_loop_command("CAPTURE")
                 elif name == "loop_clear":
                     self.request_loop_command("CLEAR")
+                elif name == "loop_repeat":
+                    self.toggle_loop_repeat()
                 elif name == "loop_quantize_feel":
                     self.feel_open = True
                 elif name == "loop_quantize":
@@ -4966,6 +4971,16 @@ class DrumPadNative:
         if not self.velocity_observed_min:
             return False
         return self.set_velocity_floor(self.velocity_observed_min)
+
+    def toggle_loop_repeat(self):
+        """Repeat forever, or play the phrase once and stop."""
+        self.loop_repeat = not self.loop_repeat
+        self.status = (
+            f"Loop repeats every {self.loop_bars} bar" + ("s" if self.loop_bars != 1 else "")
+            if self.loop_repeat else "Loop plays once and stops"
+        )
+        self.persist_settings_async()
+        return self.loop_repeat
 
     def toggle_full_level(self):
         self.full_level = not self.full_level
@@ -6032,6 +6047,14 @@ class DrumPadNative:
                                 self.scene_order[self.scene_position], boundary, True
                             )
                             should_persist = True
+                        elif not self.loop_repeat:
+                            # One pass and done. Everything scheduled inside the
+                            # bar has already fired; the boundary is where a
+                            # repeat would be armed, so simply do not arm it.
+                            self.loop_playing = False
+                            self.loop_start_ns = None
+                            self.loop_pending.clear()
+                            self.perform_fx_pending.clear()
                         else:
                             elapsed = now_ns - self.loop_start_ns
                             completed_cycles = max(1, elapsed // loop_length_ns)
@@ -7811,7 +7834,7 @@ class DrumPadNative:
 
         page = self.pattern_page
         slots = range(page * PATTERN_PAGE, min(PATTERN_COUNT, (page + 1) * PATTERN_PAGE))
-        width, gap = 34, 4
+        width, gap = 30, 3
         for column, index in enumerate(slots):
             slot = pygame.Rect(rect.x + column * (width + gap), rect.y + 22, width, 28)
             self.buttons[f"pattern_{index}"] = slot
@@ -7823,7 +7846,7 @@ class DrumPadNative:
             if self.patterns[index] is not None and index not in (self.active_pattern, self.pending_pattern):
                 pygame.draw.circle(self.screen, theme.SIGNAL, (slot.right - 6, slot.top + 6), 2)
         pages = (PATTERN_COUNT + PATTERN_PAGE - 1) // PATTERN_PAGE
-        self.buttons["pattern_page"] = pygame.Rect(rect.x + 4 * (width + gap), rect.y + 22, 32, 28)
+        self.buttons["pattern_page"] = pygame.Rect(rect.x + 4 * (width + gap), rect.y + 22, 30, 28)
         self.draw_button(self.buttons["pattern_page"], f"{page + 1}/{pages}")
 
         track = pygame.Rect(rect.x, rect.y + 60, rect.width, 16)
@@ -7848,10 +7871,15 @@ class DrumPadNative:
             x = track.x + round(track.width * loop["phase"] / total_beats)
             pygame.draw.line(self.screen, theme.ACCENT, (x, track.top + 1), (x, track.bottom - 1), 2)
 
-        self.buttons["loop_bars"] = pygame.Rect(rect.x, rect.bottom - 30, 52, 28)
-        self.buttons["loop_clear"] = pygame.Rect(rect.x + 58, rect.bottom - 30, 56, 28)
-        self.buttons["loop_quantize_feel"] = pygame.Rect(rect.x + 120, rect.bottom - 30, 52, 28)
+        self.buttons["loop_bars"] = pygame.Rect(rect.x, rect.bottom - 30, 36, 28)
+        self.buttons["loop_repeat"] = pygame.Rect(rect.x + 39, rect.bottom - 30, 44, 28)
+        self.buttons["loop_clear"] = pygame.Rect(rect.x + 86, rect.bottom - 30, 44, 28)
+        self.buttons["loop_quantize_feel"] = pygame.Rect(rect.x + 133, rect.bottom - 30, 36, 28)
         self.draw_button(self.buttons["loop_bars"], f"{loop['bars']}B")
+        self.draw_button(
+            self.buttons["loop_repeat"], "Loop" if self.loop_repeat else "Once",
+            active=self.loop_repeat,
+        )
         self.draw_button(self.buttons["loop_clear"], "Clear", enabled=bool(loop["events"]))
         self.draw_button(self.buttons["loop_quantize_feel"], "Feel", enabled=bool(loop["events"]))
 
