@@ -68,7 +68,7 @@ HIT_FLASH_RANGE = 0.11
 PAD_GHOST_SCALE = 0.6
 PAD_GHOST_OFFSET = (16, 14)
 PATTERN_PAGE = 4
-MAIN_TABS = ("Main", "Step Seq", "Sampler", "Mixer", "MIDI")
+MAIN_TABS = ("Main", "Step Seq", "Sampler", "Mixer")
 NOTE_REPEAT_RATES = ("1/4", "1/8", "1/16", "1/16T", "1/32")
 
 # What the VALUE control edits. Each entry reads and writes one parameter, so
@@ -1674,6 +1674,7 @@ class DrumPadNative:
         self.selected_pad = 0
         self.repeat_enabled = False
         self.repeat_rate = "1/16"
+        self.quantize_grid = "1/16"
         self.bpm = 120
         self.metronome_enabled = False
         self.record_start_mode = "Count 1 bar"
@@ -1891,6 +1892,9 @@ class DrumPadNative:
         self.repeat_enabled = bool(data.get("repeat_enabled", False))
         repeat_rate = str(data.get("repeat_rate", "1/16"))
         self.repeat_rate = repeat_rate if repeat_rate in REPEAT_RATES else "1/16"
+        # Older settings files carry only repeat_rate, which used to drive both.
+        quantize_grid = str(data.get("quantize_grid", self.repeat_rate))
+        self.quantize_grid = quantize_grid if quantize_grid in REPEAT_RATES else "1/16"
         self.bpm = max(BPM_MIN, min(BPM_MAX, int(data.get("bpm", 120))))
         self.metronome_enabled = bool(data.get("metronome_enabled", False))
         self.loop_repeat = bool(data.get("loop_repeat", True))
@@ -2004,6 +2008,7 @@ class DrumPadNative:
             "mapping_mode": self.mapping_mode,
             "repeat_enabled": self.repeat_enabled,
             "repeat_rate": self.repeat_rate,
+            "quantize_grid": self.quantize_grid,
             "metronome_enabled": self.metronome_enabled,
             "velocity_floor": self.velocity_floor,
             "loop_repeat": self.loop_repeat,
@@ -4439,8 +4444,6 @@ class DrumPadNative:
                     self.processed_sound_cache.clear()
                 elif name == "perform_fx_reset":
                     self.reset_perform_fx()
-                elif name == "perform_fx_bounce":
-                    self.start_loop_bounce()
                 elif name.startswith("perform_fx_track_"):
                     self.set_perform_fx_from_position(name.removeprefix("perform_fx_track_"), pos[0], rect)
                 elif name.endswith("_down"):
@@ -4770,6 +4773,8 @@ class DrumPadNative:
                     self.toggle_full_level()
                 elif name == "pad_mute":
                     self.toggle_pad_mute()
+                elif name == "resample":
+                    self.start_loop_bounce()
                 elif name == "pad_solo":
                     self.toggle_pad_solo()
                 elif name == "bpm_field":
@@ -5033,7 +5038,6 @@ class DrumPadNative:
         self.main_tab = name
         # Screens that are still overlays open on top of Main until they move.
         self.mixer_open = name == "Mixer"
-        self.settings_open = name == "MIDI"
         if name == "Sampler":
             self.sample_editor_open = bool(self.custom_sample_files[self.selected_pad])
             if not self.sample_editor_open:
@@ -5523,7 +5527,7 @@ class DrumPadNative:
             return False
         if self.loop_source_events is None:
             self.loop_source_events = list(self.loop_events)
-        grid = 1.0 / REPEAT_RATES[self.repeat_rate]
+        grid = 1.0 / REPEAT_RATES[self.quantize_grid]
         previous_events = list(self.loop_events)
         self.loop_events = apply_loop_feel(
             self.loop_source_events,
@@ -5625,8 +5629,8 @@ class DrumPadNative:
                 return False
             self.push_loop_history_locked()
             rates = tuple(REPEAT_RATES)
-            current = rates.index(self.repeat_rate)
-            self.repeat_rate = rates[(current + 1) % len(rates)]
+            current = rates.index(self.quantize_grid)
+            self.quantize_grid = rates[(current + 1) % len(rates)]
             self.apply_current_feel_locked(time.perf_counter_ns())
         self.persist_settings_async()
         return True
@@ -6300,7 +6304,7 @@ class DrumPadNative:
                 self.feel_nudge_ms = values["nudge_ms"]
                 self.feel_humanize_ms = values["humanize_ms"]
                 self.apply_current_feel_locked(now_ns)
-                message = f"Tight {self.repeat_rate}"
+                message = f"Tight {self.quantize_grid}"
                 should_persist = True
             elif command == "BARS":
                 self.clear_record_pending_locked()
@@ -7238,6 +7242,10 @@ class DrumPadNative:
             labels["sample"] = "No audio input connected"
         else:
             labels["sample"] = "Record a sample  (S)"
+        labels["resample"] = (
+            "Bounce the loop into a sample on this pad"
+            if self.loop_events else "Record a loop first, then bounce it to a pad"
+        )
         collections_to_scan = (self.buttons, self.mixer_buttons, self.perform_fx_buttons)
         hovered = next(
             ((name, rect) for collection in collections_to_scan for name, rect in collection.items()
@@ -7619,14 +7627,8 @@ class DrumPadNative:
 
         self.perform_fx_buttons["perform_fx_bypass"] = pygame.Rect(294, 540, 92, 38)
         self.perform_fx_buttons["perform_fx_reset"] = pygame.Rect(396, 540, 92, 38)
-        self.perform_fx_buttons["perform_fx_bounce"] = pygame.Rect(294, 596, 194, 42)
         self.draw_button(self.perform_fx_buttons["perform_fx_bypass"], "A/B", active=self.perform_fx_bypass)
         self.draw_button(self.perform_fx_buttons["perform_fx_reset"], "Reset")
-        self.draw_button(
-            self.perform_fx_buttons["perform_fx_bounce"],
-            "Bouncing..." if self.bounce_processing else "Bounce Loop",
-            enabled=bool(self.loop_events) and not self.bounce_processing,
-        )
 
     def draw_mixer_overlay(self):
         self.mixer_buttons.clear()
@@ -8020,7 +8022,26 @@ class DrumPadNative:
             colour = theme.ACCENT if number == active else theme.SIGNAL if layer["file"] else theme.RULE_SOFT
             pygame.draw.rect(self.screen, colour, band, border_radius=2)
 
-        self.draw_waveform(pygame.Rect(rect.x, rect.y + 64, rect.width, 44), layers[active])
+        wave = pygame.Rect(rect.x, rect.y + 64, rect.width, 44)
+        if layers[active]["file"]:
+            self.draw_waveform(wave, layers[active])
+            return
+        # An empty layer showed only the words "No sample on this layer". The
+        # two ways to fill it belong here, where the hole is.
+        pygame.draw.rect(self.screen, theme.GROUND, wave, border_radius=3)
+        pygame.draw.rect(self.screen, theme.RULE, wave, width=1, border_radius=3)
+        half = (wave.width - 6) // 2
+        self.buttons["sample"] = pygame.Rect(wave.x, wave.centery - 14, half, 28)
+        self.buttons["resample"] = pygame.Rect(wave.right - half, wave.centery - 14, half, 28)
+        self.draw_button(
+            self.buttons["sample"], "Sample", icon="microphone",
+            enabled=self.audio_inputs_available,
+        )
+        self.draw_button(
+            self.buttons["resample"],
+            "Bouncing" if self.bounce_processing else "Resample",
+            enabled=bool(self.loop_events) and not self.bounce_processing,
+        )
 
     def draw_waveform(self, rect, layer):
         """Peaks for one layer, with its trim shaded out and the loudest bar lit."""
@@ -8049,33 +8070,6 @@ class DrumPadNative:
         for edge in (start, end):
             x = rect.x + 2 + round(edge * (len(peaks) - 1))
             pygame.draw.line(self.screen, theme.SIGNAL, (x, rect.top + 2), (x, rect.bottom - 2))
-
-    def draw_pad_info_cell(self, rect):
-        index = self.selected_pad
-        y = self.cell_caption(rect, "Pad info")
-        custom = self.custom_sample_files[index]
-        label = "Sample" if custom else SYNTH_LABELS[self.pad_synths[index]]
-        self.screen.blit(self.fit_text(self.font, label, rect.width, theme.INK), (rect.x, y))
-
-        note = PAD_TO_GM_NOTE.get(self.pad_of(index))
-        self.screen.blit(self.label_font.render("Note", True, theme.INK_3), (rect.x, y + 30))
-        self.screen.blit(
-            self.data_font.render(str(note) if note is not None else "--", True, theme.INK_2),
-            (rect.x + 54, y + 28),
-        )
-        with self.state_lock:
-            velocity = self.last_velocity_value
-        self.screen.blit(self.label_font.render("Velocity", True, theme.INK_3), (rect.x, y + 54))
-        track = pygame.Rect(rect.x + 54, y + 60, rect.width - 54, 4)
-        pygame.draw.rect(self.screen, theme.RULE, track, border_radius=2)
-        filled = round(track.width * velocity / 127.0)
-        if filled:
-            pygame.draw.rect(self.screen, theme.ACCENT, pygame.Rect(track.x, track.y, filled, 4), border_radius=2)
-        self.buttons["sample"] = pygame.Rect(rect.x, rect.bottom - 32, rect.width, 30)
-        self.draw_button(
-            self.buttons["sample"], "Sample", icon="microphone",
-            enabled=self.audio_inputs_available,
-        )
 
     def draw_swing_cell(self, rect):
         y = self.cell_caption(rect, "Swing")
@@ -8850,7 +8844,7 @@ class DrumPadNative:
 
         if self.feel_advanced:
             rows = (
-                ("grid", "Grid", self.repeat_rate, 360),
+                ("grid", "Grid", self.quantize_grid, 360),
                 ("strength", "Strength", f"{self.feel_strength}%", 412),
                 ("swing", "Swing", f"{self.feel_swing}%", 464),
                 ("nudge_ms", "Nudge", f"{self.feel_nudge_ms:+d} ms", 516),

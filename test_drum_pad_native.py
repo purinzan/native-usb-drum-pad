@@ -1302,6 +1302,24 @@ class MainScreenTests(unittest.TestCase):
         base = time.perf_counter_ns()
         return [base + index * spacing_ms * 1_000_000 for index in range(count)]
 
+    def test_quantize_grid_is_not_the_note_repeat_rate(self):
+        """Two labelled controls used to share one variable.
+
+        Changing the Feel grid silently retuned Note Repeat, and vice versa,
+        which is invisible until a repeat comes out at the wrong subdivision.
+        """
+        app = self.app
+        app.repeat_rate = "1/16"
+        app.quantize_grid = "1/16"
+        app.cycle_repeat_rate()
+        self.assertNotEqual(app.repeat_rate, "1/16")
+        self.assertEqual(app.quantize_grid, "1/16")
+
+    def test_settings_has_one_entry_point(self):
+        """The MIDI tab opened the same overlay as the gear."""
+        self.assertNotIn("MIDI", drum.MAIN_TABS)
+        self.assertFalse(self.app.select_tab("MIDI"))
+
     def test_full_level_pins_every_hit_to_127(self):
         app = self.app
         app.play_pad = mock.Mock()
