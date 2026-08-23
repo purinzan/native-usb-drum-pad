@@ -592,6 +592,31 @@ class KitTests(unittest.TestCase):
         app.play_pad(hat_index, 80, "N42")
         self.assertIs(layers[-1], drum.KIT["open_hat_dark"][0])
 
+    def test_no_shipped_sample_opens_with_dead_air(self):
+        """Padding differs between round robin files, so it reads as a flam.
+
+        Thirty one files opened with up to 26 ms of silence before this bound
+        existed, which made the same pad land differently on successive hits.
+        """
+        late = []
+        for name in drum.all_sample_files():
+            path = drum.sample_path(name)
+            with wave.open(str(path), "rb") as source:
+                channels, rate = source.getnchannels(), source.getframerate()
+                raw = source.readframes(min(source.getnframes(), rate // 2))
+            packed = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(-1, 3)
+            values = (
+                packed[:, 0].astype(numpy.int32)
+                | (packed[:, 1].astype(numpy.int32) << 8)
+                | (packed[:, 2].astype(numpy.int32) << 16)
+            )
+            values = numpy.where(values & 0x800000, values - 0x1000000, values)
+            mono = numpy.max(numpy.abs(values.reshape(-1, channels)), axis=1).astype(numpy.float32)
+            onset_ms = int(numpy.argmax(mono > mono.max() * 0.02)) / rate * 1000.0
+            if onset_ms > 1.5:
+                late.append(f"{name} {onset_ms:.2f} ms")
+        self.assertEqual(late, [])
+
     def test_all_referenced_samples_exist(self):
         missing = [
             name
