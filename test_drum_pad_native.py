@@ -827,6 +827,29 @@ class KitBTests(unittest.TestCase):
             onset_ms = int(numpy.argmax(mono > mono.max() * 0.02)) / 48.0
             self.assertLess(onset_ms, 1.0, f"{name} starts {onset_ms:.2f} ms late")
 
+    def test_the_pattern_page_follows_a_queued_switch(self):
+        app = drum.DrumPadNative(settings_path=None)
+        self.assertEqual(app.pattern_page, 0)
+        with app.loop_lock:
+            app.switch_pattern_locked(5, time.perf_counter_ns(), False)
+        # Slot 6 lives on page 2, so the strip must move with it.
+        self.assertEqual(app.active_pattern, 5)
+        self.assertEqual(app.pattern_page, 1)
+
+    def test_the_bottom_row_shows_one_page_of_slots(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.init_pygame()
+        self.addCleanup(drum.pygame.quit)
+        app.buttons = {}
+        app.draw_pattern_strip(compact=True)
+        shown = sorted(
+            int(name.removeprefix("pattern_"))
+            for name in app.buttons
+            if name.removeprefix("pattern_").isdigit()
+        )
+        self.assertEqual(shown, [0, 1, 2, 3])
+        self.assertIn("pattern_page", app.buttons)
+
     def test_every_slot_has_a_name_worth_reading(self):
         for slot in drum.KIT_SLOTS:
             self.assertIn(slot, drum.KIT_NAMES)

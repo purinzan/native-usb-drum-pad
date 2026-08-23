@@ -118,6 +118,7 @@ def build():
         "head": Face(HEAD, 25),                               # panel headings
         "big": Face(HEAD, 42),                                # modal titles
         "data": Face(DATA, 15),                               # inline numbers
+        "data_md": Face(DATA, 23),                            # header readouts
         "data_lg": Face(DATA, 28),                            # BPM, velocity
         "data_sm": Face(DATA, 12),                            # note numbers, ms
     }
