@@ -708,6 +708,32 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.selected_pad, self.snare)
         self.assertIsNone(app.pad_drag_from)
 
+    def test_drag_becomes_active_only_past_the_threshold(self):
+        app = self.app
+        rects = app.pad_rects()
+        app.begin_pad_drag(self.kick, rects[self.kick].center)
+        self.assertFalse(app.pad_drag_active)
+        app.update_pad_drag((rects[self.kick].centerx + 4, rects[self.kick].centery))
+        self.assertFalse(app.pad_drag_active)
+        app.update_pad_drag((rects[self.kick].centerx + 40, rects[self.kick].centery))
+        self.assertTrue(app.pad_drag_active)
+        app.finish_pad_drag(rects[self.kick].center)
+        self.assertFalse(app.pad_drag_active)
+
+    def test_a_swap_flashes_both_pads(self):
+        app = self.app
+        app.swap_pads(self.kick, self.snare)
+        self.assertEqual(set(app.pad_swap_flash), {self.kick, self.snare})
+        self.assertGreater(min(app.pad_swap_flash.values()), time.perf_counter())
+
+    def test_the_kit_hue_follows_the_sound(self):
+        kick_color = drum.synth_color("kick", (0, 0, 0))
+        snare_color = drum.synth_color("snare", (0, 0, 0))
+        self.assertNotEqual(kick_color, snare_color)
+        # Variants inherit the base sound's hue rather than falling back.
+        self.assertEqual(drum.synth_color("snare_warm", (0, 0, 0)), snare_color)
+        self.assertEqual(drum.synth_color("open_hat_dry", (0, 0, 0)), drum.synth_color("open_hat", (0, 0, 0)))
+
     def test_command_arrow_moves_the_sound_and_follows_it(self):
         import pygame
 

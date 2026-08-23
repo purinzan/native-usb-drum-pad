@@ -7,9 +7,13 @@ Local desktop drum app using pygame-ce, the platform MIDI API, and the trimmed S
 ![Main screen](ui-main.png)
 
 The panel is graphite and colour means state, not identity: amber marks the pad
-sounding now, the pad selected, and an armed Record. Each pad keeps a 2px stripe
-of its kit hue so the layout stays learnable. Every number is set in a monospace
-face with tabular figures, so readouts do not jitter as they update.
+sounding now, the pad selected, and an armed Record. A pad carries one name, and
+it is the sound it will play — after the kit is rearranged a fixed position name
+would only contradict it. The 2px stripe carries the kit hue and travels with
+the sound, turning teal when the pad holds one of your own samples. The number
+in the corner is the MIDI note that fires that physical pad, so it stays put.
+Every number is set in a monospace face with tabular figures, so readouts do not
+jitter as they update.
 
 ## Requirements
 
@@ -69,7 +73,9 @@ Controls:
 - `Sample`: record from the selected audio input and assign the result to the selected pad.
 - Sampling defaults to `Auto`: it waits for sound, keeps 200 ms of pre-roll, stops after sustained silence, and reports excessive input level. `Manual` remains available in Settings.
 - `Use Kit Sound`: remove the custom assignment and return to the built-in kit sound.
-- Rearranging the kit: drag one pad onto another to swap their sounds, or hold
+- Rearranging the kit: drag one pad onto another to swap their sounds. The
+  dragged sound rides the cursor as a chip, the pad under it lifts and shows a
+  two-way arrow, and both pads flash on the drop. Or hold
   Cmd (Ctrl elsewhere) and press an arrow key to move the selected pad's sound
   to its neighbour. The sound, its sample, edits, tuning, mixer settings and
   mute all travel, and so do recorded hits and sequenced steps, so moving the
