@@ -4764,21 +4764,14 @@ class DrumPadNative:
                     self.select_kit(name.removeprefix("kit_"))
                 elif name == "kit_browse":
                     self.switch_kit()
-                elif name == "latch_on":
-                    if not self.note_repeat_latch:
-                        self.toggle_note_repeat_latch()
-                elif name == "latch_off":
-                    if self.note_repeat_latch:
-                        self.toggle_note_repeat_latch()
+                elif name == "latch":
+                    self.toggle_note_repeat_latch()
                 elif name == "full_level":
                     self.toggle_full_level()
                 elif name == "pad_mute":
                     self.toggle_pad_mute()
                 elif name == "pad_solo":
                     self.toggle_pad_solo()
-                elif name == "metro_off":
-                    if self.metronome_enabled:
-                        self.toggle_metronome()
                 elif name == "bpm_field":
                     self.select_value_target("bpm")
                 elif name == "value_swing":
@@ -4793,8 +4786,6 @@ class DrumPadNative:
                     self.nudge_value(1)
                 elif name == "value_knob":
                     self.value_drag_from = pos[1]
-                elif name == "project_more":
-                    self.project_menu_open = True
                 elif name == "loop_stop":
                     self.request_loop_command("STOP")
                 elif name == "loop_record":
@@ -5046,7 +5037,7 @@ class DrumPadNative:
         if name == "Sampler":
             self.sample_editor_open = bool(self.custom_sample_files[self.selected_pad])
             if not self.sample_editor_open:
-                self.browser_open = True
+                self.status = "No sample on this pad - Browse or drop a file onto the window"
         return True
 
     def select_kit(self, slot):
@@ -7298,17 +7289,15 @@ class DrumPadNative:
         pattern = f"{self.active_pattern + 1:02d} Pattern"
         self.draw_field("pattern_scenes", pygame.Rect(552, 12, 144, 48), "Sequence", pattern)
         kit_name = KIT_NAMES.get(self.active_kit, self.active_kit)
-        self.draw_field("kit", pygame.Rect(704, 12, 168, 48), f"Program \u00b7 Kit {self.active_kit}",
+        self.draw_field(None, pygame.Rect(704, 12, 168, 48), f"Program \u00b7 Kit {self.active_kit}",
                         kit_name, value_color=theme.ACCENT)
 
         name, dot, _hint = self.midi_activity() if self.midi_input else ("No MIDI", theme.DANGER, "")
         pygame.draw.circle(self.screen, dot, (890, 36), 4)
         self.screen.blit(self.label_font.render("MIDI in", True, theme.INK_3), (900, 29))
 
-        self.buttons["settings"] = pygame.Rect(966, 22, 30, 28)
+        self.buttons["settings"] = pygame.Rect(982, 22, 42, 28)
         self.draw_button(self.buttons["settings"], "", icon="gear")
-        self.buttons["project_more"] = pygame.Rect(1000, 22, 24, 28)
-        self.draw_button(self.buttons["project_more"], "\u2026")
 
     def draw_field(self, button, rect, caption, value, active=False, value_color=None):
         """A caption over a value. Registers a button when the cell is clickable."""
@@ -7974,17 +7963,15 @@ class DrumPadNative:
             x = track.x + round(track.width * loop["phase"] / total_beats)
             pygame.draw.line(self.screen, theme.ACCENT, (x, track.top + 1), (x, track.bottom - 1), 2)
 
-        self.buttons["loop_bars"] = pygame.Rect(rect.x, rect.bottom - 30, 36, 28)
-        self.buttons["loop_repeat"] = pygame.Rect(rect.x + 39, rect.bottom - 30, 44, 28)
-        self.buttons["loop_clear"] = pygame.Rect(rect.x + 86, rect.bottom - 30, 44, 28)
-        self.buttons["loop_quantize_feel"] = pygame.Rect(rect.x + 133, rect.bottom - 30, 36, 28)
+        self.buttons["loop_bars"] = pygame.Rect(rect.x, rect.bottom - 30, 48, 28)
+        self.buttons["loop_repeat"] = pygame.Rect(rect.x + 54, rect.bottom - 30, 58, 28)
+        self.buttons["loop_clear"] = pygame.Rect(rect.x + 118, rect.bottom - 30, 51, 28)
         self.draw_button(self.buttons["loop_bars"], f"{loop['bars']}B")
         self.draw_button(
             self.buttons["loop_repeat"], "Loop" if self.loop_repeat else "Once",
             active=self.loop_repeat,
         )
         self.draw_button(self.buttons["loop_clear"], "Clear", enabled=bool(loop["events"]))
-        self.draw_button(self.buttons["loop_quantize_feel"], "Feel", enabled=bool(loop["events"]))
 
     def draw_program_cell(self, rect):
         y = self.cell_caption(rect, "Program")
@@ -8108,10 +8095,11 @@ class DrumPadNative:
 
     def draw_metronome_cell(self, rect):
         y = self.cell_caption(rect, "Metronome")
-        self.buttons["metro"] = pygame.Rect(rect.x, y, 62, 30)
-        self.buttons["metro_off"] = pygame.Rect(rect.x + 70, y, 62, 30)
-        self.draw_button(self.buttons["metro"], "On", danger=self.metronome_enabled)
-        self.draw_button(self.buttons["metro_off"], "Off", active=not self.metronome_enabled)
+        self.buttons["metro"] = pygame.Rect(rect.x, y, 132, 30)
+        self.draw_button(
+            self.buttons["metro"], "On" if self.metronome_enabled else "Off",
+            danger=self.metronome_enabled, icon="metronome",
+        )
         self.buttons["value_metronome"] = pygame.Rect(rect.x, y + 40, rect.width, 40)
         active = self.value_target == "metronome"
         self.screen.blit(self.label_font.render("Level", True, theme.INK_3), (rect.x, y + 44))
@@ -8181,11 +8169,8 @@ class DrumPadNative:
         self.buttons["repeat"] = pygame.Rect(x0, 158, width, 30)
         self.draw_button(self.buttons["repeat"], "Repeat", active=self.repeat_enabled, icon="repeat")
 
-        self.screen.blit(self.label_font.render("Latch", True, theme.INK_3), (x0, 206))
-        self.buttons["latch_on"] = pygame.Rect(x0, 226, 58, 30)
-        self.buttons["latch_off"] = pygame.Rect(x0 + 66, 226, 58, 30)
-        self.draw_button(self.buttons["latch_on"], "On", danger=self.note_repeat_latch)
-        self.draw_button(self.buttons["latch_off"], "Off", active=not self.note_repeat_latch)
+        self.buttons["latch"] = pygame.Rect(x0, 206, width, 30)
+        self.draw_button(self.buttons["latch"], "Latch", danger=self.note_repeat_latch)
 
         self.screen.blit(self.label_font.render("Pad bank", True, theme.INK_3), (x0, 278))
         for column, bank in enumerate(PAD_BANKS):
@@ -8221,8 +8206,8 @@ class DrumPadNative:
         pygame.draw.rect(self.screen, theme.RULE, actions, width=1, border_radius=theme.RADIUS["panel"])
         loop = self.loop_snapshot()
         for row, (key, label, icon, enabled) in enumerate((
-            ("mixer", "Mixer", "sliders", True),
             ("loop_quantize", "Quantize", "magnet", bool(loop["events"])),
+            ("loop_quantize_feel", "Feel", "sliders", bool(loop["events"])),
             ("loop_undo", "Undo", "undo", loop["can_undo"]),
             ("loop_redo", "Redo", "redo", loop["can_redo"]),
         )):
