@@ -6,11 +6,19 @@ Local desktop drum app using pygame-ce, the platform MIDI API, and the trimmed S
 
 ![Main screen](ui-main.png)
 
+The panel is graphite and colour means state, not identity: amber marks the pad
+sounding now, the pad selected, and an armed Record. Each pad keeps a 2px stripe
+of its kit hue so the layout stays learnable. Every number is set in a monospace
+face with tabular figures, so readouts do not jitter as they update.
+
 ## Requirements
 
 - Windows 10 or later, or macOS 12 or later (Apple Silicon and Intel)
 - Python 3.12 or later (numpy 2.5 does not build for 3.11)
 - A class-compliant USB MIDI drum pad (developed against the Donner Starrypad)
+
+No extra install step: the UI fonts ship in `assets/fonts/`, and every icon is
+drawn from primitives at run time so it stays sharp at all three UI scales.
 
 ## Setup
 
@@ -87,6 +95,18 @@ Controls:
 - `Export MIDI`: write a Standard MIDI file using General MIDI drum notes.
 - `L`: record. `O`: overdub. `C`: capture. `U`: undo. `Y`: redo. `Q`: quantize.
 - `Esc`: quit.
+
+## Design
+
+| Module | Holds |
+| --- | --- |
+| `theme.py` | Every colour in the UI as a named token, plus the spacing and radius scale. Nothing draws with a raw RGB tuple. |
+| `typeface.py` | The bundled faces. Barlow and Barlow Condensed for text and labels, IBM Plex Mono for all numbers, with a system CJK face behind them so Japanese MIDI port names render. |
+| `icons.py` | 24 icons drawn as lines and polygons on a 16x16 grid. |
+| `tools/make_assets.py` | Regenerates the grain tile and the app icons, including `starrypad.icns` and `starrypad.ico`. |
+
+Fonts are Barlow, Barlow Condensed and IBM Plex Mono, all under the SIL Open
+Font License; the licence texts sit beside them in `assets/fonts/`.
 
 Performance behavior:
 

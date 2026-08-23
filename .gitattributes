@@ -4,3 +4,6 @@
 *.mid binary
 *.command text eol=lf
 *.bat text eol=crlf
+*.ttf binary
+*.icns binary
+*.ico binary

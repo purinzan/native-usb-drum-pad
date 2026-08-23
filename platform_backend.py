@@ -17,11 +17,6 @@ IS_WINDOWS = sys.platform == "win32"
 IS_MACOS = sys.platform == "darwin"
 
 AUDIO_DRIVER = "wasapi" if IS_WINDOWS else "coreaudio" if IS_MACOS else ""
-UI_FONT_NAME = (
-    "Segoe UI" if IS_WINDOWS
-    else "SF Pro Text,Helvetica Neue,Helvetica,Arial" if IS_MACOS
-    else "DejaVu Sans,Liberation Sans,Arial"
-)
 
 CALLBACK_FUNCTION = 0x00030000
 MIM_DATA = 0x3C3
