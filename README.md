@@ -62,14 +62,18 @@ Controls:
 
 - `Device`: cycle MIDI input devices.
 - `DONNER` / `GM` / `Learn`: cycle Starrypad preset mapping mode.
-- **Kits hold sounds; patterns hold rhythms.** They are separate, and the
-  header button names the kit you are on: `A · Acoustic`, `B · 808 Glass`.
-  Press `K` or click it to cycle. Kit A ships the acoustic Salamander kit, Kit B
+- **Kits hold sounds; patterns hold rhythms.** They are separate, and the header
+  carries the kit in its own readout: `KIT B / 808 Glass`. Press `K` or click the
+  readout to cycle. Kit A ships the acoustic Salamander kit, Kit B
   a TR-808 core with glass on the cymbal and hand percussion pads, and C and D
   start as copies of A. A kit you have edited is never replaced when a newer
   factory kit ships.
-- `P1` through `P8` along the bottom are the eight **pattern** slots for the
-  sequencer. They change what is played, never what it is played with.
+- The bottom row shows four **pattern** slots at a time; the `1/2` button pages
+  to the other four, and the page follows whichever pattern starts playing.
+  Patterns change what is played, never what it is played with.
+- Master volume has its own readout beside the kit, with `-` and `+`.
+- Selecting a pad shows its Level, Pan, Tune and Bus under the sound name, so
+  the mix is visible while playing. Editing them is still behind `Mixer`.
 - `Reset`: reset the current mapping mode.
 - `+` / `-`: adjust volume.
 - Click a pad to select it, then use the `Sound` arrows or `Sensitivity` controls.
