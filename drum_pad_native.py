@@ -878,6 +878,9 @@ KIT_B_PAD_SYNTHS = (
     "cymbal8", "glass_break", "maraca8", "glass_tap",
 )
 FACTORY_KIT_SYNTHS = {"A": DEFAULT_PAD_SYNTHS, "B": KIT_B_PAD_SYNTHS}
+# Naming the kits is what tells you they hold sounds. "Kit A" told you nothing,
+# so people reached for the pattern buttons instead.
+KIT_NAMES = {"A": "Acoustic", "B": "808 Glass", "C": "Kit C", "D": "Kit D"}
 SYNTH_TO_GM_NOTE = {
     "kick": 36,
     "snare": 38,
@@ -2264,7 +2267,8 @@ class DrumPadNative:
         self.mixer_bypass = False
         self.pad_selection = {self.selected_pad}
         self.persist_settings()
-        self.log(f"Kit: {self.active_kit}")
+        self.status = f"Kit {self.active_kit}: {KIT_NAMES.get(self.active_kit, self.active_kit)}"
+        self.log(self.status)
 
     def adjust_pad_sensitivity(self, amount):
         self.push_project_history()
@@ -3752,6 +3756,8 @@ class DrumPadNative:
             self.request_loop_command("REDO")
         elif key == pygame.K_c:
             self.request_loop_command("CAPTURE")
+        elif key == pygame.K_k:
+            self.switch_kit()
         elif key == pygame.K_q:
             self.request_loop_command("QUANTIZE")
         elif key == pygame.K_s:
@@ -6363,13 +6369,16 @@ class DrumPadNative:
             "loop_quantize": "Feel and quantize  (Q)", "loop_clear": "Clear the loop",
             "loop_bars": "Loop length", "repeat": "Note repeat  (N)",
             "repeat_rate": "Repeat subdivision", "metro": "Metronome  (M)",
-            "tap": "Tap tempo", "kit": "Switch kit", "settings": "Settings",
+            "tap": "Tap tempo", "settings": "Settings",
             "project": "Projects: new, open, save as", "browser": "Browse sounds",
             "mixer": "Pad mixer", "perform_fx": "Perform FX", "share": "Share and export",
             "sample_edit": "Edit the sample", "sample_clear": "Back to the kit sound",
             "view_perform": "Play the pads", "view_sequence": "Step sequencer",
             "reconnect": "Reconnect MIDI and audio",
         }
+        labels["kit"] = f"Sound kit, not pattern  (K)  \u00b7  now {KIT_NAMES.get(self.active_kit, self.active_kit)}"
+        for slot in range(PATTERN_COUNT):
+            labels[f"pattern_{slot}"] = f"Pattern {slot + 1}: a rhythm, not a sound kit"
         if not self.audio_inputs_available:
             labels["sample"] = "No audio input connected"
         else:
@@ -6410,29 +6419,29 @@ class DrumPadNative:
         audio_ready = bool(pygame.mixer.get_init())
         if connected and audio_ready:
             name, dot, _hint = self.midi_activity()
-            self.draw_chip(pygame.Rect(132, 13, 186, 26), name, dot)
+            self.draw_chip(pygame.Rect(124, 13, 180, 26), name, dot)
         else:
-            self.buttons["reconnect"] = pygame.Rect(132, 12, 118, 28)
+            self.buttons["reconnect"] = pygame.Rect(124, 12, 118, 28)
             self.draw_button(self.buttons["reconnect"], "Reconnect", danger=True)
 
-        self.buttons["project"] = pygame.Rect(330, 12, 170, 28)
+        self.buttons["project"] = pygame.Rect(312, 12, 140, 28)
         self.draw_button(self.buttons["project"], self.project_name[:22])
 
-        self.buttons["view_perform"] = pygame.Rect(512, 12, 78, 28)
-        self.buttons["view_sequence"] = pygame.Rect(594, 12, 84, 28)
+        self.buttons["view_perform"] = pygame.Rect(460, 12, 74, 28)
+        self.buttons["view_sequence"] = pygame.Rect(538, 12, 82, 28)
         self.draw_button(self.buttons["view_perform"], "Perform", active=self.view_mode == "Perform")
         self.draw_button(self.buttons["view_sequence"], "Sequence", active=self.view_mode == "Sequence")
 
         peaking = time.perf_counter() < self.master_peak_warning_until
         if peaking:
             peak = self.data_font_sm.render("PEAK", True, theme.DANGER)
-            self.screen.blit(peak, (694, 26 - peak.get_height() // 2))
+            self.screen.blit(peak, (630, 26 - peak.get_height() // 2))
 
-        self.buttons["vol_down"] = pygame.Rect(748, 12, 26, 28)
-        self.buttons["vol_up"] = pygame.Rect(824, 12, 26, 28)
+        self.buttons["vol_down"] = pygame.Rect(672, 12, 26, 28)
+        self.buttons["vol_up"] = pygame.Rect(748, 12, 26, 28)
         self.draw_button(self.buttons["vol_down"], "-")
         self.draw_button(self.buttons["vol_up"], "+")
-        volume_track = pygame.Rect(780, 23, 38, 6)
+        volume_track = pygame.Rect(704, 23, 38, 6)
         pygame.draw.rect(self.screen, theme.RULE, volume_track, border_radius=3)
         pygame.draw.rect(
             self.screen,
@@ -6441,9 +6450,12 @@ class DrumPadNative:
             border_radius=3,
         )
 
-        self.buttons["kit"] = pygame.Rect(858, 12, 62, 28)
+        self.buttons["kit"] = pygame.Rect(782, 12, 138, 28)
         self.buttons["settings"] = pygame.Rect(928, 12, 88, 28)
-        self.draw_button(self.buttons["kit"], f"Kit {self.active_kit}")
+        self.draw_button(
+            self.buttons["kit"],
+            f"{self.active_kit} \u00b7 {KIT_NAMES.get(self.active_kit, self.active_kit)}",
+        )
         self.draw_button(self.buttons["settings"], "Settings", icon="gear")
     def midi_activity(self):
         """Chip text and dot colour for the open MIDI port.

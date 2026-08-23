@@ -802,6 +802,25 @@ class KitBTests(unittest.TestCase):
             onset_ms = int(numpy.argmax(mono > mono.max() * 0.02)) / 48.0
             self.assertLess(onset_ms, 1.0, f"{name} starts {onset_ms:.2f} ms late")
 
+    def test_every_slot_has_a_name_worth_reading(self):
+        for slot in drum.KIT_SLOTS:
+            self.assertIn(slot, drum.KIT_NAMES)
+        # The two shipped kits say what they hold, not just which slot they are.
+        self.assertEqual(drum.KIT_NAMES["A"], "Acoustic")
+        self.assertEqual(drum.KIT_NAMES["B"], "808 Glass")
+
+    def test_k_switches_kit_and_says_so(self):
+        import pygame
+
+        app = drum.DrumPadNative(settings_path=None)
+        self.assertEqual(app.active_kit, "A")
+        with mock.patch.object(pygame.key, "get_mods", return_value=0):
+            self.assertTrue(app.handle_key(pygame.K_k))
+        self.assertEqual(app.active_kit, "B")
+        self.assertEqual(app.pad_synths, list(drum.KIT_B_PAD_SYNTHS))
+        # switch_kit only logged before, so the change was invisible on screen.
+        self.assertIn("808 Glass", app.status)
+
     def test_a_new_session_starts_with_the_shipped_kits(self):
         app = drum.DrumPadNative(settings_path=None)
         self.assertEqual(app.kit_slots["A"]["pad_synths"], list(drum.DEFAULT_PAD_SYNTHS))
