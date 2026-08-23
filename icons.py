@@ -92,6 +92,13 @@ def _magnet(surface, rect, color):
     _stroke(surface, rect, color, [(9, 10.5), (12, 10.5)])
 
 
+def _swap(surface, rect, color):
+    _stroke(surface, rect, color, [(3, 6), (12, 6)])
+    _stroke(surface, rect, color, [(9.5, 3.5), (12, 6), (9.5, 8.5)])
+    _stroke(surface, rect, color, [(13, 10), (4, 10)])
+    _stroke(surface, rect, color, [(6.5, 7.5), (4, 10), (6.5, 12.5)])
+
+
 def _zap(surface, rect, color):
     _fill(surface, rect, color, [(9.5, 2), (4.5, 9), (7.5, 9), (6.5, 14), (11.5, 7), (8.5, 7)])
 
@@ -184,6 +191,7 @@ PAINTERS = {
     "metronome": _metronome,
     "repeat": _repeat,
     "magnet": _magnet,
+    "swap": _swap,
     "zap": _zap,
     "microphone": _microphone,
     "waveform": _waveform,

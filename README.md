@@ -69,6 +69,13 @@ Controls:
 - `Sample`: record from the selected audio input and assign the result to the selected pad.
 - Sampling defaults to `Auto`: it waits for sound, keeps 200 ms of pre-roll, stops after sustained silence, and reports excessive input level. `Manual` remains available in Settings.
 - `Use Kit Sound`: remove the custom assignment and return to the built-in kit sound.
+- Rearranging the kit: drag one pad onto another to swap their sounds, or hold
+  Cmd (Ctrl elsewhere) and press an arrow key to move the selected pad's sound
+  to its neighbour. The sound, its sample, edits, tuning, mixer settings and
+  mute all travel, and so do recorded hits and sequenced steps, so moving the
+  kick somewhere easier to reach does not change how the loop sounds.
+  Sensitivity and calibration stay with the physical pad they were measured on.
+  One undo puts the layout back.
 - Drop an audio file onto the window to trim, normalize, convert, and assign it to the selected pad.
 - `Edit` opens a non-destructive waveform editor for crop, zoom, normalize, reverse, fades, tune, A/B, and One-shot/Gate/Toggle/Loop playback.
 - `Chop` splits a sample by transients, equal divisions, manual waveform marks, or live pad taps and expands it across available pads with optional play-through and choke behavior.
@@ -94,6 +101,7 @@ Controls:
 - `Share`: export a 48 kHz stereo Master WAV, MIDI, aligned 16-pad stems, or a portable Project Bundle containing the project and its used samples.
 - `Export MIDI`: write a Standard MIDI file using General MIDI drum notes.
 - `L`: record. `O`: overdub. `C`: capture. `U`: undo. `Y`: redo. `Q`: quantize.
+- Arrow keys move the pad selection; pad 1 is bottom left, so Up moves a row up.
 - `Esc`: closes the open panel. With nothing open it names the quit shortcut
   rather than quitting, so reaching for the usual cancel key mid-take does not
   end the session.

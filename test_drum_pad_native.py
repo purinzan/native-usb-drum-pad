@@ -365,8 +365,12 @@ class AccessibilityTests(unittest.TestCase):
             self.assertEqual(app.keyboard_focus_name, "first")
             app.handle_key(drum.pygame.K_RETURN)
             app.keyboard_focus_name = None
-            app.handle_key(drum.pygame.K_DOWN)
+            # Pad 0 is bottom left, so Up moves to the row above it.
+            app.handle_key(drum.pygame.K_UP)
             self.assertEqual(app.selected_pad, 4)
+            app.handle_key(drum.pygame.K_DOWN)
+            self.assertEqual(app.selected_pad, 0)
+            app.handle_key(drum.pygame.K_UP)
             app.handle_key(drum.pygame.K_RETURN)
         app.handle_mouse.assert_called_once_with((30, 25), 0)
         app.queue_pad.assert_called_once_with(4, 112)
@@ -618,6 +622,102 @@ class MappingTests(unittest.TestCase):
         )
         self.assertIsNone(self.app.resolve_preset_pad("N", 20))
         self.assertIsNone(self.app.resolve_preset_pad("CC", 20))
+
+
+class PadSwapTests(unittest.TestCase):
+    """Rearranging the layout moves the sound, not the physical pad's response."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+        self.kick = drum.PAD_NAME_TO_INDEX["Kick"]
+        self.snare = drum.PAD_NAME_TO_INDEX["Snare"]
+
+    def test_sound_travels_and_calibration_stays_put(self):
+        app = self.app
+        app.pad_synths[self.kick] = "kick"
+        app.pad_synths[self.snare] = "snare"
+        app.pad_volume[self.kick] = 0.4
+        app.custom_sample_files[self.snare] = "take.wav"
+        app.pad_sensitivity[self.kick] = 1.4
+        app.pad_calibrations[self.kick]["enabled"] = True
+
+        self.assertTrue(app.swap_pads(self.kick, self.snare))
+
+        self.assertEqual(app.pad_synths[self.kick], "snare")
+        self.assertEqual(app.pad_synths[self.snare], "kick")
+        self.assertEqual(app.pad_volume[self.snare], 0.4)
+        self.assertEqual(app.custom_sample_files[self.kick], "take.wav")
+        # Sensitivity and calibration describe the rubber, so they do not move.
+        self.assertEqual(app.pad_sensitivity[self.kick], 1.4)
+        self.assertTrue(app.pad_calibrations[self.kick]["enabled"])
+
+    def test_recorded_hits_follow_the_sound_so_the_take_is_unchanged(self):
+        app = self.app
+        app.loop_events = [(0.0, self.kick, 100), (1.0, self.snare, 90), (2.0, 7, 80)]
+        app.loop_event_meta = {drum.event_meta_key(self.kick, 0.0): {"chance": 50, "ratchet": 2}}
+
+        app.swap_pads(self.kick, self.snare)
+
+        self.assertEqual(
+            app.loop_events,
+            sorted([(0.0, self.snare, 100), (1.0, self.kick, 90), (2.0, 7, 80)]),
+        )
+        self.assertEqual(
+            app.loop_event_meta[drum.event_meta_key(self.snare, 0.0)],
+            {"chance": 50, "ratchet": 2},
+        )
+
+    def test_stored_patterns_are_remapped_too(self):
+        app = self.app
+        # Slot 0 is the active one and is synced from the live loop, so a
+        # stored slot is what proves the remap reaches saved patterns.
+        app.patterns[1] = app.sanitize_pattern_data(
+            {"bars": 1, "events": [[0.5, self.kick, 110]], "event_meta": {}}
+        )
+        app.swap_pads(self.kick, self.snare)
+        self.assertEqual(app.patterns[1]["events"], [(0.5, self.snare, 110)])
+
+    def test_one_undo_restores_the_layout(self):
+        app = self.app
+        app.pad_synths[self.kick] = "kick"
+        app.swap_pads(self.kick, self.snare)
+        self.assertNotEqual(app.pad_synths[self.kick], "kick")
+        app.undo_project_edit()
+        self.assertEqual(app.pad_synths[self.kick], "kick")
+
+    def test_a_pad_cannot_swap_with_itself(self):
+        self.assertFalse(self.app.swap_pads(self.kick, self.kick))
+
+    def test_drag_below_the_threshold_does_not_swap(self):
+        app = self.app
+        rects = app.pad_rects()
+        app.begin_pad_drag(self.kick, rects[self.kick].center)
+        app.update_pad_drag((rects[self.kick].centerx + 3, rects[self.kick].centery))
+        self.assertIsNone(app.pad_drag_over)
+        self.assertFalse(app.finish_pad_drag(rects[self.snare].center))
+
+    def test_dragging_onto_another_pad_swaps_and_selects_it(self):
+        app = self.app
+        app.pad_synths[self.kick] = "kick"
+        rects = app.pad_rects()
+        app.begin_pad_drag(self.kick, rects[self.kick].center)
+        app.update_pad_drag(rects[self.snare].center)
+        self.assertEqual(app.pad_drag_over, self.snare)
+        self.assertTrue(app.finish_pad_drag(rects[self.snare].center))
+        self.assertEqual(app.pad_synths[self.snare], "kick")
+        self.assertEqual(app.selected_pad, self.snare)
+        self.assertIsNone(app.pad_drag_from)
+
+    def test_command_arrow_moves_the_sound_and_follows_it(self):
+        import pygame
+
+        app = self.app
+        app.selected_pad = self.kick
+        app.pad_synths[self.kick] = "kick"
+        with mock.patch.object(pygame.key, "get_mods", return_value=drum.COMMAND_MODIFIER):
+            self.assertTrue(app.handle_key(pygame.K_UP))
+        self.assertEqual(app.selected_pad, self.kick + 4)
+        self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
 class QuitShortcutTests(unittest.TestCase):

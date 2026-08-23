@@ -57,6 +57,10 @@ MIDI_HEALTH_CHECK_SECONDS = 2.0
 PERFORMANCE_BUFFER_SECONDS = 120.0
 PERFORMANCE_PHRASE_GAP_SECONDS = 2.0
 MIDI_SILENCE_HINT_SECONDS = 4.0
+PAD_DRAG_THRESHOLD = 10
+PAD_MOVE_DELTAS = {
+    pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: 4, pygame.K_DOWN: -4,
+}
 # macOS puts app shortcuts on Command; accept Control there too rather than
 # retiring a chord anyone may already have in their fingers.
 COMMAND_MODIFIER = (pygame.KMOD_META | pygame.KMOD_CTRL) if IS_MACOS else pygame.KMOD_CTRL
@@ -106,6 +110,38 @@ def apply_loop_feel(events, bars, grid, strength, swing, nudge_ms, humanize_ms, 
 
 def event_meta_key(pad, beat):
     return f"{int(pad)}:{float(beat):.6f}"
+
+
+# What a pad plays travels when the layout is rearranged. Sensitivity and
+# calibration do not: they describe the physical rubber, not the sound on it.
+SOUND_PAD_FIELDS = (
+    "pad_synths", "custom_sample_files", "sample_edits",
+    "pad_volume", "pad_pan", "pad_tune",
+    "pad_punch", "pad_air", "pad_space", "pad_bus", "pad_mute",
+)
+
+
+def swap_event_pads(events, first, second):
+    swapped = []
+    for beat, pad, velocity in events:
+        pad = int(pad)
+        pad = second if pad == first else first if pad == second else pad
+        swapped.append((beat, pad, velocity))
+    return sorted(swapped)
+
+
+def swap_event_meta_pads(meta, first, second):
+    remapped = {}
+    for key, value in meta.items():
+        pad_text, _, beat_text = str(key).partition(":")
+        try:
+            pad, beat = int(pad_text), float(beat_text)
+        except ValueError:
+            remapped[key] = value
+            continue
+        pad = second if pad == first else first if pad == second else pad
+        remapped[event_meta_key(pad, beat)] = value
+    return remapped
 
 
 def sanitize_event_meta(value):
@@ -1256,6 +1292,9 @@ class DrumPadNative:
         self.pad_space = [0] * len(PADS)
         self.pad_bus = [0] * len(PADS)
         self.pad_selection = {0}
+        self.pad_drag_from = None
+        self.pad_drag_over = None
+        self.pad_drag_origin = None
         self.solo_pads = set()
         self.mixer_bypass = False
         self.mixer_open = False
@@ -3424,9 +3463,14 @@ class DrumPadNative:
                     running = self.handle_key(event.key, event.unicode)
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self.handle_mouse(self.window_to_logical(event.pos), pygame.key.get_mods())
+                elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.finish_pad_drag(self.window_to_logical(event.pos))
                 elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.perform_fx_open:
                     self.mouse_logical = self.window_to_logical(event.pos)
                     self.handle_perform_fx_drag(self.mouse_logical)
+                elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.pad_drag_from is not None:
+                    self.mouse_logical = self.window_to_logical(event.pos)
+                    self.update_pad_drag(self.mouse_logical)
                 elif event.type == pygame.MOUSEMOTION:
                     self.mouse_logical = self.window_to_logical(event.pos)
                 elif event.type == pygame.VIDEORESIZE:
@@ -3462,6 +3506,9 @@ class DrumPadNative:
         if modifiers & COMMAND_MODIFIER:
             if key == pygame.K_q:
                 return False
+            if key in PAD_MOVE_DELTAS and self.view_mode == "Perform":
+                self.move_selected_pad(PAD_MOVE_DELTAS[key])
+                return True
             if key == pygame.K_z:
                 self.redo_project_edit() if modifiers & pygame.KMOD_SHIFT else self.undo_project_edit()
             elif key == pygame.K_y:
@@ -3542,7 +3589,8 @@ class DrumPadNative:
                 self.keyboard_focus_name = names[(current + direction) % len(names)]
             return True
         if key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN) and self.view_mode == "Perform":
-            delta = {pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: -4, pygame.K_DOWN: 4}[key]
+            # Pad 0 is bottom left, so a higher index is higher on screen.
+            delta = {pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: 4, pygame.K_DOWN: -4}[key]
             self.selected_pad = (self.selected_pad + delta) % len(PADS)
             self.pad_selection = {self.selected_pad}
             return True
@@ -4082,7 +4130,90 @@ class DrumPadNative:
                 else:
                     self.pad_selection = {index}
                 self.queue_pad(index, 112)
+                self.begin_pad_drag(index, pos)
                 return
+
+    def swap_pads(self, first, second):
+        """Move one pad's sound onto another and bring its music along.
+
+        Rearranging the layout should not rewrite the take, so recorded hits and
+        sequenced steps follow the sound to its new pad. One undo puts the whole
+        thing back.
+        """
+        first, second = int(first), int(second)
+        if first == second or not (0 <= first < len(PADS) and 0 <= second < len(PADS)):
+            return False
+
+        self.push_project_history()
+
+        for field in SOUND_PAD_FIELDS:
+            values = getattr(self, field)
+            values[first], values[second] = values[second], values[first]
+
+        was_solo = (first in self.solo_pads, second in self.solo_pads)
+        self.solo_pads.difference_update({first, second})
+        if was_solo[0]:
+            self.solo_pads.add(second)
+        if was_solo[1]:
+            self.solo_pads.add(first)
+
+        with self.loop_lock:
+            self.loop_events = swap_event_pads(self.loop_events, first, second)
+            if self.loop_source_events is not None:
+                self.loop_source_events = swap_event_pads(self.loop_source_events, first, second)
+            self.loop_event_meta = swap_event_meta_pads(self.loop_event_meta, first, second)
+            self.rebuild_loop_pending_locked(time.perf_counter_ns())
+
+        for pattern in self.patterns:
+            if not pattern:
+                continue
+            pattern["events"] = swap_event_pads(pattern["events"], first, second)
+            if pattern["source_events"] is not None:
+                pattern["source_events"] = swap_event_pads(pattern["source_events"], first, second)
+            pattern["event_meta"] = swap_event_meta_pads(pattern["event_meta"], first, second)
+
+        # Either pad may still be sounding its old voice. The derived sound
+        # caches key on content rather than pad index, so nothing else to clear.
+        self.audio_events.put(("PANIC",))
+        self.status = f"Swapped {PADS[first]['name']} and {PADS[second]['name']}  \u00b7  Undo with U"
+        self.persist_settings_async()
+        return True
+
+    def move_selected_pad(self, delta):
+        """Swap the selected pad with a neighbour and follow it."""
+        target = (self.selected_pad + delta) % len(PADS)
+        if self.swap_pads(self.selected_pad, target):
+            self.selected_pad = target
+            self.pad_selection = {target}
+            return True
+        return False
+
+    def begin_pad_drag(self, index, pos):
+        self.pad_drag_from = index
+        self.pad_drag_origin = pos
+        self.pad_drag_over = None
+
+    def update_pad_drag(self, pos):
+        if self.pad_drag_from is None or self.pad_drag_origin is None:
+            return
+        moved = abs(pos[0] - self.pad_drag_origin[0]) + abs(pos[1] - self.pad_drag_origin[1])
+        if moved < PAD_DRAG_THRESHOLD:
+            return
+        if self.pad_drag_over is None:
+            self.status = "Drop on another pad to swap the sounds"
+        over = next((index for index, rect in self.pad_rects().items() if rect.collidepoint(pos)), None)
+        self.pad_drag_over = over if over != self.pad_drag_from else None
+
+    def finish_pad_drag(self, pos):
+        source, target = self.pad_drag_from, self.pad_drag_over
+        self.pad_drag_from = self.pad_drag_over = self.pad_drag_origin = None
+        if source is None or target is None:
+            return False
+        if self.swap_pads(source, target):
+            self.selected_pad = target
+            self.pad_selection = {target}
+            return True
+        return False
 
     def focusable_controls(self):
         if self.clip_prompt_open: collection = self.clip_prompt_buttons
@@ -6578,8 +6709,13 @@ class DrumPadNative:
             selected = index in self.pad_selection
             sounding = now < self.hit_until[index]
 
-            face = theme.PAD_HIT if sounding else theme.PAD
-            border = theme.ACCENT if sounding else theme.ACCENT if selected else theme.RULE
+            dragging_from = index == self.pad_drag_from and self.pad_drag_over is not None
+            drop_target = index == self.pad_drag_over
+
+            face = theme.PAD_HIT if sounding or drop_target else theme.PAD
+            border = theme.ACCENT if sounding or selected or drop_target else theme.RULE
+            if dragging_from:
+                face, border = theme.mix(theme.PAD, theme.GROUND, 0.5), theme.INK_3
             if muted:
                 face, border = theme.dim(face, 0.4), theme.dim(border, 0.6)
             if sounding:
@@ -6590,10 +6726,14 @@ class DrumPadNative:
             stripe = pygame.Rect(rect.x + 1, rect.y + 1, rect.width - 2, 2)
             hue = theme.hue_hint(pad["color"])
             pygame.draw.rect(self.screen, theme.dim(hue, 0.6) if muted else hue, stripe)
-            pygame.draw.rect(self.screen, border, rect, width=2 if (sounding or selected) else 1, border_radius=radius)
+            edge = 2 if (sounding or selected or drop_target) else 1
+            pygame.draw.rect(self.screen, border, rect, width=edge, border_radius=radius)
+            if drop_target:
+                # The two-way arrow says swap, not move.
+                icons.draw(self.screen, "swap", pygame.Rect(rect.centerx - 12, rect.centery - 12, 24, 24), theme.ACCENT)
 
-            name_color = theme.ACCENT if sounding else theme.INK if selected else theme.INK_2
-            if muted:
+            name_color = theme.ACCENT if sounding or drop_target else theme.INK if selected else theme.INK_2
+            if muted or dragging_from:
                 name_color = theme.INK_3
             name = self.label_font.render(pad["name"], True, name_color)
             self.screen.blit(name, (rect.left + 12, rect.top + 14))
