@@ -84,7 +84,7 @@ QUIT_SHORTCUT = "Cmd-Q" if IS_MACOS else "Ctrl-Q"
 AUDIO_HEALTH_CHECK_SECONDS = 2.0
 AUDIO_MODES = ("Low latency", "Stable")
 AUDIO_RATES = (48000, 44100)
-AUDIO_BUFFERS = (64, 128, 256)
+AUDIO_BUFFERS = (32, 64, 128, 256)
 SAMPLE_PLAY_MODES = ("One-shot", "Gate", "Toggle", "Loop")
 FEEL_PRESETS = {
     "Tight": {"strength": 100, "swing": 50, "nudge_ms": 0, "humanize_ms": 0},
@@ -2838,6 +2838,47 @@ class DrumPadNative:
             measured = None
         self._latency_cache[key] = measured
         return measured
+
+    def native_rate_cost(self):
+        """What running off the device's native rate costs, measured.
+
+        The headphone output here runs at 96 kHz natively; feeding it 48 kHz
+        makes CoreAudio resample, which measured 3.1 ms. The mixer cannot follow
+        yet because sampling and export are written around a fixed 48 kHz, so
+        this reports the cost rather than removing it.
+        """
+        try:
+            import sounddevice
+
+            name = self.audio_output_name
+            info = (
+                sounddevice.query_devices(name, "output") if name
+                else sounddevice.query_devices(kind="output")
+            )
+            native = int(round(info["default_samplerate"]))
+        except Exception:
+            return None
+        if native == self.audio_rate:
+            return None
+        current = self.measure_output_latency(self.audio_output_name)
+        key = f"{self.audio_output_name or ''}@{native}"
+        if key not in self._latency_cache:
+            measured = None
+            try:
+                import sounddevice
+
+                with sounddevice.OutputStream(
+                    device=self.audio_output_name, samplerate=native, channels=2,
+                    blocksize=self.audio_buffer, latency="low",
+                ) as stream:
+                    measured = float(stream.latency) * 1000.0
+            except Exception:
+                measured = None
+            self._latency_cache[key] = measured
+        at_native = self._latency_cache[key]
+        if current is None or at_native is None:
+            return native, None
+        return native, current - at_native
 
     def fastest_output(self):
         """The output with the lowest measured latency, and by how much."""
@@ -8357,6 +8398,15 @@ class DrumPadNative:
                 f"{best[0]} is {saving:.0f} ms faster", 454, theme.SIGNAL,
             )
             self.screen.blit(hint, (294, 434))
+        else:
+            native = self.native_rate_cost()
+            if native and native[1] and native[1] > 0.5:
+                note = self.fit_text(
+                    self.small_font,
+                    f"Device runs at {native[0] / 1000:g} kHz; converting costs {native[1]:.1f} ms",
+                    454, theme.INK_3,
+                )
+                self.screen.blit(note, (294, 434))
 
         self.settings_buttons["audio_advanced"] = pygame.Rect(294, 464, 120, 34)
         self.draw_button(self.settings_buttons["audio_advanced"], "Advanced")

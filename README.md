@@ -88,7 +88,10 @@ Controls:
   was out by a factor of four here, 12.9 ms advertised against 55.6 ms real. The
   buffer is the only part the app controls and it is a small fraction of the
   total, so the panel names a faster output when one exists. Changing outputs
-  beats any buffer setting available. Advanced settings expose 48/44.1 kHz and 64/128/256 sample buffers; failed changes restore the last working setup.
+  beats any buffer setting available. When the output runs at a different rate
+  from the mixer the panel reports what the conversion costs, measured the same
+  way; the mixer cannot follow a device to 96 kHz yet because sampling and
+  export are written around a fixed 48 kHz. Advanced settings expose 48/44.1 kHz and 64/128/256 sample buffers; failed changes restore the last working setup.
 - The project name in the header opens New/Open/Recent/Save As/Collect. Projects autosave atomically, recover from a backup, and keep app/device preferences separate from musical content.
 - Project Undo/Redo keeps up to 20 pad, kit, sample, sensitivity, and tempo edits; loop Undo/Redo also keeps 20 operations.
 - `Feel` keeps original loop timing and offers Tight/Natural/Loose. Advanced controls expose Grid, Strength, Swing, Nudge, and deterministic Humanize; Reset restores the exact recorded timing.
