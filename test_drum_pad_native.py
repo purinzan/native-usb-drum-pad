@@ -781,6 +781,85 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class MainScreenTests(unittest.TestCase):
+    """The controls the MPC-style surface added."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+
+    @staticmethod
+    def hits(count, spacing_ms=200):
+        """Timestamps far enough apart to clear the duplicate-pulse dead time."""
+        base = time.perf_counter_ns()
+        return [base + index * spacing_ms * 1_000_000 for index in range(count)]
+
+    def test_full_level_pins_every_hit_to_127(self):
+        app = self.app
+        app.play_pad = mock.Mock()
+        first, second = self.hits(2)
+        app.handle_midi_trigger("N", 36, 20, first)
+        self.assertEqual(app.play_pad.call_args[0][1], 20)
+        app.toggle_full_level()
+        app.handle_midi_trigger("N", 36, 20, second)
+        self.assertEqual(app.play_pad.call_args[0][1], 127)
+
+    def test_latch_keeps_a_repeat_running_until_the_next_hit(self):
+        app = self.app
+        app.repeat_enabled = True
+        app.play_pad = mock.Mock()
+        app.toggle_note_repeat_latch()
+
+        first, second = self.hits(2)
+        app.handle_midi_trigger("N", 36, 100, first)
+        self.assertIn(("N", 36), app.held_triggers)
+        app.handle_midi_release("N", 36)
+        # Releasing does not stop a latched pad.
+        self.assertIn(("N", 36), app.held_triggers)
+        app.handle_midi_trigger("N", 36, 100, second)
+        self.assertNotIn(("N", 36), app.held_triggers)
+
+    def test_without_latch_a_release_stops_the_repeat(self):
+        app = self.app
+        app.repeat_enabled = True
+        app.play_pad = mock.Mock()
+        app.handle_midi_trigger("N", 36, 100, self.hits(1)[0])
+        self.assertIn(("N", 36), app.held_triggers)
+        app.handle_midi_release("N", 36)
+        self.assertNotIn(("N", 36), app.held_triggers)
+
+    def test_the_value_control_drives_every_target(self):
+        app = self.app
+        for target in drum.VALUE_TARGETS:
+            self.assertTrue(app.select_value_target(target))
+            before = app.value_spec()[1]
+            app.nudge_value(2)
+            self.assertNotEqual(app.value_spec()[1], before, target)
+        self.assertFalse(app.select_value_target("nonsense"))
+
+    def test_the_knob_pointer_stays_inside_its_sweep(self):
+        app = self.app
+        for target in drum.VALUE_TARGETS:
+            app.value_target = target
+            self.assertGreaterEqual(app.value_fraction(), 0.0)
+            self.assertLessEqual(app.value_fraction(), 1.0)
+
+    def test_selecting_a_kit_slot_lands_on_it(self):
+        app = self.app
+        self.assertTrue(app.select_kit("C"))
+        self.assertEqual(app.active_kit, "C")
+        self.assertFalse(app.select_kit("C"))
+
+    def test_stop_always_stops_where_play_toggles(self):
+        app = self.app
+        app.loop_events = [(0.0, 0, 100)]
+        app.handle_loop_command("PLAY", time.perf_counter_ns())
+        self.assertTrue(app.loop_playing)
+        app.handle_loop_command("STOP", time.perf_counter_ns())
+        self.assertFalse(app.loop_playing)
+        app.handle_loop_command("STOP", time.perf_counter_ns())
+        self.assertFalse(app.loop_playing)
+
+
 class KitBTests(unittest.TestCase):
     """Kit B ships the CC0 TR-808 core plus the generated glass."""
 
