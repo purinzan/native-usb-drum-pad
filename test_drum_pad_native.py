@@ -781,6 +781,65 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class TempoDetectionTests(unittest.TestCase):
+    """Graded against material whose tempo is known by construction."""
+
+    @staticmethod
+    def click_track(bpm, seconds, rate=48000):
+        """A click on every beat. Nothing syncopated, so there is one answer."""
+        frames = int(seconds * rate)
+        track = numpy.zeros(frames, dtype=numpy.float32)
+        length = int(0.02 * rate)
+        click = (
+            numpy.sin(2 * numpy.pi * 1800 * numpy.arange(length) / rate)
+            * numpy.exp(-numpy.arange(length) / (0.002 * rate))
+        ).astype(numpy.float32)
+        interval = 60.0 / bpm
+        beat = 0
+        while beat * interval < seconds:
+            at = int(beat * interval * rate)
+            if at + length < frames:
+                track[at:at + length] += click
+            beat += 1
+        return (numpy.repeat((track * 0.8)[:, None], 2, axis=1) * 32767).astype(numpy.int16)
+
+    def test_a_long_file_is_not_read_at_half_tempo(self):
+        """The bar-alignment term grew with duration rather than correctness.
+
+        On a 96 second file at 96 bpm it scored 89.6 for the right answer
+        against 12.8 for half of it, so the slowest reading always won.
+        """
+        detected = drum.detect_sample_tempo(self.click_track(96, 96))
+        self.assertIsNotNone(detected)
+        self.assertAlmostEqual(detected[0], 96.0, delta=1.5)
+
+    def test_common_tempos_land_on_the_beat_or_a_simple_multiple(self):
+        """Half and double are inherent, not a defect.
+
+        A bare click at 84 is genuinely indistinguishable from 168; real music
+        carries a backbeat that settles it, and the app has a Half/Double
+        control for when it does not. What must not happen is an answer that is
+        neither, which is what the long-file bias produced.
+        """
+        for bpm in (84, 96, 120, 128, 140):
+            detected = drum.detect_sample_tempo(self.click_track(bpm, 40))
+            self.assertIsNotNone(detected, bpm)
+            ratios = [abs(detected[0] / bpm - factor) for factor in (0.5, 1.0, 2.0)]
+            self.assertLess(min(ratios), 0.03, f"{bpm} bpm -> {detected[0]}")
+
+    def test_a_short_loop_still_reports_its_bar_count(self):
+        # Four bars at 120 bpm is 8 seconds; bar alignment is evidence here.
+        detected = drum.detect_sample_tempo(self.click_track(120, 8))
+        self.assertIsNotNone(detected)
+        self.assertAlmostEqual(detected[0], 120.0, delta=1.5)
+        self.assertIn(detected[1], (1, 2, 4, 8, 16))
+
+    def test_a_long_file_reports_no_bar_count(self):
+        # Nothing meaningful to say about bars in a three minute file.
+        detected = drum.detect_sample_tempo(self.click_track(120, 60))
+        self.assertIsNone(detected[1])
+
+
 class MusicImportTests(unittest.TestCase):
     """Dropping a song on the window and getting it onto pads."""
 

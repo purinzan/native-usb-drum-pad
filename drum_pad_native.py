@@ -451,13 +451,28 @@ def detect_sample_tempo(samples, sample_rate=MIXER_FREQUENCY):
     candidates = []
     for multiplier in (0.5, 1.0, 2.0, 4.0):
         bpm = raw_bpm * multiplier
-        if 40 <= bpm <= 240:
-            beats = duration * bpm / 60.0
-            nearest_bars = min((1, 2, 4, 8, 16), key=lambda bars: abs(beats - bars * 4))
-            bar_error = abs(beats - nearest_bars * 4)
-            range_penalty = 0 if 85 <= bpm <= 145 else 0.75
-            candidates.append((bar_error + range_penalty, bpm, nearest_bars))
-    _score, bpm, bars = min(candidates)
+        if not 40 <= bpm <= 240:
+            continue
+        beats = duration * bpm / 60.0
+        nearest_bars = min((1, 2, 4, 8, 16), key=lambda bars: abs(beats - bars * 4))
+        range_penalty = 0.0 if 85 <= bpm <= 145 else 0.75
+        if beats <= 16 * 4 + 2:
+            # Short enough to be a loop, so how cleanly it fills whole bars is
+            # the strongest evidence available.
+            score = abs(beats - nearest_bars * 4) + range_penalty
+            bars = nearest_bars
+        else:
+            # Longer than any loop. Bar alignment now grows with duration
+            # rather than with correctness, and on a 96 second file it reaches
+            # 89 for the right answer against 12 for half of it, so the slowest
+            # reading always won. Score the musical range and staying near what
+            # was actually measured instead.
+            score = range_penalty + abs(math.log2(multiplier)) * 0.25
+            bars = None
+        candidates.append((score, bpm, bars))
+    if not candidates:
+        return None
+    _score, bpm, bars = min(candidates, key=lambda entry: (entry[0], entry[1]))
     confidence = float(correlation[lag] / max(1e-9, correlation[0]))
     return round(bpm, 1), bars, max(0.0, min(1.0, confidence))
 
