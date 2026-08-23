@@ -781,6 +781,59 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class LoopRepeatTests(unittest.TestCase):
+    """Loop repeats forever; Once plays the phrase and stops."""
+
+    @staticmethod
+    def play(repeat, bars=1, bpm=120, passes=2.5):
+        fired = []
+        app = drum.DrumPadNative(settings_path=None)
+        app.play_pad = lambda index, *_rest: fired.append(index)
+        app.bpm, app.loop_bars, app.loop_repeat = bpm, bars, repeat
+        app.loop_events = [(0.0, 0, 100), (2.0, 1, 100)]
+        now = 1_000_000_000
+        app.handle_loop_command("PLAY", now)
+        bar_ns = int(bars * 4 * 60 / bpm * 1_000_000_000)
+        for step in range(0, int(bar_ns * passes), max(1, bar_ns // 16)):
+            app.process_loop_scheduler(now + step)
+        return app, fired
+
+    def test_a_repeating_loop_keeps_going(self):
+        app, fired = self.play(repeat=True)
+        self.assertTrue(app.loop_playing)
+        self.assertGreater(len(fired), 4)
+
+    def test_once_stops_after_a_single_pass(self):
+        app, fired = self.play(repeat=False)
+        self.assertFalse(app.loop_playing)
+        self.assertIsNone(app.loop_start_ns)
+        self.assertEqual(len(fired), 2)
+
+    def test_once_still_plays_everything_in_the_phrase(self):
+        """Stopping at the boundary must not swallow the last events."""
+        _app, fired = self.play(repeat=False, bars=2)
+        self.assertEqual(sorted(fired), [0, 1])
+
+    def test_one_bar_is_the_shortest_loop(self):
+        self.assertEqual(min(drum.LOOP_BAR_OPTIONS), 1)
+
+    def test_the_toggle_says_which_way_it_went(self):
+        app = drum.DrumPadNative(settings_path=None)
+        self.assertTrue(app.loop_repeat)
+        self.assertFalse(app.toggle_loop_repeat())
+        self.assertIn("once", app.status.casefold())
+        self.assertTrue(app.toggle_loop_repeat())
+        self.assertIn("repeat", app.status.casefold())
+
+    def test_the_choice_survives_a_settings_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            app = drum.DrumPadNative(settings_path=path)
+            app.toggle_loop_repeat()
+            app.persist_settings()
+            self.assertFalse(drum.DrumPadNative(settings_path=path).loop_repeat)
+
+
 class TempoDetectionTests(unittest.TestCase):
     """Graded against material whose tempo is known by construction."""
 

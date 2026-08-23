@@ -148,7 +148,10 @@ Controls:
 - `Capture`: recover the most recent pad performance without recording audio in the background.
 - `Undo` / `Redo`: move backward or forward through loop edits, including Capture.
 - `Q 1/16`: quantize loop hits to the current Note Repeat subdivision.
-- `1B` / `2B` / `4B`: cycle the loop length.
+- `1B` / `2B` / `4B`: cycle the loop length. One bar is the shortest.
+- `Loop` / `Once`: repeat forever, or play the phrase once and stop. The
+  boundary is the only place a loop becomes a loop, so `Once` simply does not
+  arm the next pass; everything inside the bar has already fired by then.
 - `Share`: export a 48 kHz stereo Master WAV, MIDI, aligned 16-pad stems, or a portable Project Bundle containing the project and its used samples.
 - `Export MIDI`: write a Standard MIDI file using General MIDI drum notes.
 - `L`: record. `O`: overdub. `C`: capture. `U`: undo. `Y`: redo. `Q`: quantize.
