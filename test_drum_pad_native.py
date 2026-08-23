@@ -781,6 +781,80 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class ChopByHandTests(unittest.TestCase):
+    """The waveform is the control surface: drag to cut, click to remove."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+        # Stand in for a loaded sample so the marker maths has a length.
+        self.app.current_sample_array = lambda: numpy.zeros((48000, 2), dtype=numpy.int16)
+
+    def test_touching_an_automatic_chop_keeps_its_cuts(self):
+        """Refining a Transient or Equal chop by hand used to start from nothing."""
+        app = self.app
+        app.chop_mode, app.chop_count = "Equal", 4
+        self.assertEqual(app.chop_markers, [])
+        app.begin_chop_drag(0.5)
+        self.assertEqual(app.chop_mode, "Manual")
+        self.assertEqual([round(value, 3) for value in app.chop_markers], [0.25, 0.5, 0.75])
+
+    def test_a_drag_moves_the_marker_it_started_on(self):
+        app = self.app
+        app.chop_mode = "Manual"
+        app.chop_markers = [0.25, 0.5, 0.75]
+        app.begin_chop_drag(0.5)
+        app.update_chop_drag(0.62)
+        app.finish_chop_drag(0.62)
+        self.assertEqual([round(value, 3) for value in app.chop_markers], [0.25, 0.62, 0.75])
+
+    def test_markers_cannot_cross_each_other(self):
+        """Order on screen is slice order, so a swap reads as the cut jumping."""
+        app = self.app
+        app.chop_mode = "Manual"
+        app.chop_markers = [0.25, 0.5, 0.75]
+        app.begin_chop_drag(0.5)
+        app.update_chop_drag(0.95)
+        self.assertLess(app.chop_markers[1], app.chop_markers[2])
+        app.update_chop_drag(0.01)
+        self.assertGreater(app.chop_markers[1], app.chop_markers[0])
+
+    def test_a_click_on_a_handle_removes_that_cut(self):
+        app = self.app
+        app.chop_mode = "Manual"
+        app.chop_markers = [0.25, 0.5, 0.75]
+        app.begin_chop_drag(0.25)
+        app.finish_chop_drag(0.25)
+        self.assertEqual([round(value, 3) for value in app.chop_markers], [0.5, 0.75])
+
+    def test_a_drag_on_empty_waveform_places_a_new_cut(self):
+        app = self.app
+        app.chop_mode = "Manual"
+        app.chop_markers = [0.5]
+        app.begin_chop_drag(0.10)
+        app.update_chop_drag(0.14)
+        app.finish_chop_drag(0.14)
+        self.assertEqual(len(app.chop_markers), 2)
+        self.assertAlmostEqual(app.chop_markers[0], 0.14, places=2)
+
+    def test_a_click_on_empty_waveform_plays_that_slice(self):
+        app = self.app
+        app.chop_mode = "Manual"
+        app.chop_markers = [0.5]
+        played = []
+        app.audition_chop_slice = lambda ratio: played.append(ratio) or True
+        app.begin_chop_drag(0.30)
+        app.finish_chop_drag(0.30)
+        self.assertEqual(played, [0.30])
+        # Auditioning must not change the cuts.
+        self.assertEqual(app.chop_markers, [0.5])
+
+    def test_a_press_outside_the_waveform_does_nothing_on_release(self):
+        app = self.app
+        app.chop_markers = [0.5]
+        app.finish_chop_drag(0.4)
+        self.assertEqual(app.chop_markers, [0.5])
+
+
 class LoopRepeatTests(unittest.TestCase):
     """Loop repeats forever; Once plays the phrase and stops."""
 

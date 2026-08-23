@@ -1652,6 +1652,10 @@ class DrumPadNative:
         self.chop_choke = False
         self.chop_lazy_active = False
         self.chop_lazy_started_at = None
+        self.chop_drag_index = None
+        self.chop_press = None
+        self.chop_hover_marker = None
+        self.audition_sound = None
         self.chop_wave_rect = None
         self.browser_open = False
         self.browser_buttons = {}
@@ -3730,6 +3734,102 @@ class DrumPadNative:
         ratios = sorted(set(value for value in self.chop_markers if 0.01 <= value <= 0.99))
         return [0] + [round(len(samples) * value) for value in ratios] + [len(samples)]
 
+    def adopt_displayed_markers(self):
+        """Turn whatever is on screen into markers you can move.
+
+        Transient and Equal compute their cuts on the fly, so touching the
+        waveform used to drop them and start from nothing. Refining an
+        automatic chop by hand was impossible; now the automatic cuts are the
+        starting point.
+        """
+        if self.chop_mode == "Manual":
+            return True
+        samples = self.current_sample_array()
+        if samples is None or not len(samples):
+            return False
+        inner = self.current_chop_markers(samples)[1:-1]
+        self.chop_markers = sorted(value / len(samples) for value in inner)
+        self.chop_mode = "Manual"
+        return True
+
+    def chop_wave_ratio(self, position):
+        """Where a screen point falls along the chop waveform, 0 to 1."""
+        if not self.chop_wave_rect or not self.chop_wave_rect.width:
+            return 0.0
+        ratio = (position[0] - self.chop_wave_rect.left) / self.chop_wave_rect.width
+        return max(0.0, min(1.0, ratio))
+
+    def marker_at(self, ratio, tolerance=0.012):
+        """Index of the marker under `ratio`, or None."""
+        best, distance = None, tolerance
+        for index, value in enumerate(self.chop_markers):
+            gap = abs(value - ratio)
+            if gap < distance:
+                best, distance = index, gap
+        return best
+
+    def begin_chop_drag(self, ratio):
+        self.adopt_displayed_markers()
+        self.chop_press = ratio
+        self.chop_drag_index = self.marker_at(ratio)
+
+    def update_chop_drag(self, ratio):
+        """Move the held marker, or create one once the press turns into a drag."""
+        if self.chop_press is None:
+            return
+        if self.chop_drag_index is None:
+            if abs(ratio - self.chop_press) < 0.004:
+                return
+            self.chop_markers.append(self.chop_press)
+            self.chop_markers.sort()
+            self.chop_drag_index = self.chop_markers.index(self.chop_press)
+        index = self.chop_drag_index
+        # Markers cannot cross each other; the order on screen is the order of
+        # the slices, and swapping them mid drag reads as the cut jumping.
+        low = self.chop_markers[index - 1] + 0.01 if index > 0 else 0.01
+        high = self.chop_markers[index + 1] - 0.01 if index + 1 < len(self.chop_markers) else 0.99
+        self.chop_markers[index] = max(low, min(high, ratio))
+
+    def finish_chop_drag(self, ratio):
+        """A drag places a cut; a click removes one, or plays the slice."""
+        pressed, index = self.chop_press, self.chop_drag_index
+        moved = pressed is not None and abs(ratio - pressed) >= 0.004
+        self.chop_press = self.chop_drag_index = None
+        if pressed is None:
+            return
+        if moved:
+            self.chop_markers.sort()
+            return
+        if index is not None:
+            del self.chop_markers[index]
+            self.status = f"{len(self.chop_markers) + 1} slices"
+            return
+        self.audition_chop_slice(pressed)
+
+    def audition_chop_slice(self, ratio):
+        """Play the slice under the cursor, so it can be judged before it lands."""
+        samples = self.current_sample_array()
+        if samples is None or not len(samples):
+            return False
+        markers = self.current_chop_markers(samples)
+        position = int(max(0.0, min(0.999, ratio)) * len(samples))
+        for start, end in zip(markers, markers[1:]):
+            if start <= position < end and end > start:
+                import numpy
+
+                try:
+                    chunk = numpy.ascontiguousarray(samples[start:end])
+                    self.audition_sound = pygame.sndarray.make_sound(chunk)
+                except (pygame.error, ValueError):
+                    return False
+                channel = pygame.mixer.find_channel(True)
+                if channel is None:
+                    return False
+                channel.play(self.audition_sound)
+                self.status = f"Slice {markers.index(start) + 1} of {len(markers) - 1}"
+                return True
+        return False
+
     def start_lazy_chop(self):
         samples = self.current_sample_array()
         if samples is None:
@@ -4015,7 +4115,13 @@ class DrumPadNative:
                     self.nudge_value(event.y)
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                     self.value_drag_from = None
+                    if self.chop_press is not None and self.chop_wave_rect:
+                        self.mouse_logical = self.window_to_logical(event.pos)
+                        self.finish_chop_drag(self.chop_wave_ratio(self.mouse_logical))
                     self.finish_pad_drag(self.window_to_logical(event.pos))
+                elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.chop_press is not None:
+                    self.mouse_logical = self.window_to_logical(event.pos)
+                    self.update_chop_drag(self.chop_wave_ratio(self.mouse_logical))
                 elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.perform_fx_open:
                     self.mouse_logical = self.window_to_logical(event.pos)
                     self.handle_perform_fx_drag(self.mouse_logical)
@@ -4262,10 +4368,7 @@ class DrumPadNative:
             if self.chop_wave_rect and self.chop_wave_rect.collidepoint(pos):
                 ratio = (pos[0] - self.chop_wave_rect.left) / self.chop_wave_rect.width
                 if 0.01 <= ratio <= 0.99:
-                    self.chop_mode = "Manual"
-                    if all(abs(ratio - value) >= 0.01 for value in self.chop_markers):
-                        self.chop_markers.append(ratio)
-                        self.chop_markers.sort()
+                    self.begin_chop_drag(ratio)
                 return
             return
 
@@ -8344,9 +8447,29 @@ class DrumPadNative:
         marker_ratios = []
         if samples is not None and len(samples):
             marker_ratios = [value / len(samples) for value in self.current_chop_markers(samples)[1:-1]]
-        for ratio in marker_ratios:
+        cursor_ratio = None
+        if self.chop_wave_rect.collidepoint(self.mouse_logical):
+            cursor_ratio = (self.mouse_logical[0] - self.chop_wave_rect.left) / self.chop_wave_rect.width
+        self.chop_hover_marker = self.marker_at(cursor_ratio) if cursor_ratio is not None else None
+        for index, ratio in enumerate(marker_ratios):
             x = self.chop_wave_rect.left + round(ratio * self.chop_wave_rect.width)
-            pygame.draw.line(self.screen, theme.PANEL, (x, self.chop_wave_rect.top + 4), (x, self.chop_wave_rect.bottom - 4), 2)
+            held = self.chop_drag_index == index
+            near = self.chop_mode == "Manual" and self.chop_hover_marker == index
+            colour = theme.ACCENT if held or near else theme.INK
+            pygame.draw.line(self.screen, colour, (x, self.chop_wave_rect.top + 4),
+                             (x, self.chop_wave_rect.bottom - 4), 2)
+            # A grab handle, so the line reads as something you can take hold of.
+            handle = pygame.Rect(x - 5, self.chop_wave_rect.top + 2, 10, 9)
+            pygame.draw.rect(self.screen, colour, handle, border_radius=2)
+        hint = (
+            "Drag to place a cut  ·  click a handle to remove  ·  click a slice to hear it"
+            if self.chop_mode == "Manual" else
+            "Touch the waveform to take these cuts over by hand"
+        )
+        self.screen.blit(
+            self.fit_text(self.small_font, hint, self.chop_wave_rect.width, theme.INK_3),
+            (self.chop_wave_rect.left, self.chop_wave_rect.bottom + 6),
+        )
 
         self.chop_buttons["chop_mode"] = pygame.Rect(274, 378, 160, 40)
         self.chop_buttons["chop_count"] = pygame.Rect(446, 378, 112, 40)
