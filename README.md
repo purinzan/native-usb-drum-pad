@@ -91,7 +91,11 @@ Controls:
   beats any buffer setting available. When the output runs at a different rate
   from the mixer the panel reports what the conversion costs, measured the same
   way; the mixer cannot follow a device to 96 kHz yet because sampling and
-  export are written around a fixed 48 kHz. Advanced settings expose 48/44.1 kHz and 64/128/256 sample buffers; failed changes restore the last working setup.
+  export are written around a fixed 48 kHz.
+- The `Buffer` setting reaches the hardware. SDL buffers to its chunk size but
+  never sets the device's own buffer frame size, so the device sat at 512 frames
+  however small a chunk was asked for. The app now sets it and puts the original
+  back on exit, because the setting belongs to the device rather than to us. Advanced settings expose 48/44.1 kHz and 64/128/256 sample buffers; failed changes restore the last working setup.
 - The project name in the header opens New/Open/Recent/Save As/Collect. Projects autosave atomically, recover from a backup, and keep app/device preferences separate from musical content.
 - Project Undo/Redo keeps up to 20 pad, kit, sample, sensitivity, and tempo edits; loop Undo/Redo also keeps 20 operations.
 - `Feel` keeps original loop timing and offers Tight/Natural/Loose. Advanced controls expose Grid, Strength, Swing, Nudge, and deterministic Humanize; Reset restores the exact recorded timing.
@@ -186,6 +190,7 @@ opens the sample editor or the browser, rather than being screens of their own.
 | `tools/build_kit_b.py` | Rebuilds `samples/tr808/` from the CC0 pack and generates `samples/impact/`. |
 | `tools/trim_samples.py` | Reports or removes dead air at the front of any shipped sample. |
 | `tools/audio_latency.py` | Measures what every audio output actually costs, and names the fastest. |
+| `coreaudio.py` | Reads the CoreAudio HAL and sets the device buffer, which SDL never does. |
 
 Fonts are Barlow, Barlow Condensed and IBM Plex Mono, all under the SIL Open
 Font License; the licence texts sit beside them in `assets/fonts/`.

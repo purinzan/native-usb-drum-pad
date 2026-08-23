@@ -16,6 +16,7 @@ import wave
 import zipfile
 from pathlib import Path
 
+import coreaudio
 import icons
 import theme
 import typeface
@@ -1401,6 +1402,8 @@ class DrumPadNative:
         self.grain = None
         self._device_latency_ms = None
         self._latency_cache = {}
+        self._hal_device = None
+        self._hal_original_frames = None
         self.audio_inputs_available = False
         self.last_midi_event_ns = 0
         self.midi_opened_at = 0.0
@@ -2704,6 +2707,7 @@ class DrumPadNative:
                 self.bounce_thread.join(timeout=10.0)
             self.persist_settings()
             self.wait_for_export()
+            self.restore_hardware_buffer()
             pygame.quit()
 
     def init_pygame(self):
@@ -2715,7 +2719,9 @@ class DrumPadNative:
             devicename=self.audio_output_name,
         )
         pygame.init()
-        if not pygame.mixer.get_init():
+        if pygame.mixer.get_init():
+            self.apply_hardware_buffer(self.audio_output_name, self.audio_buffer)
+        else:
             try:
                 self.initialize_mixer(self.audio_output_name, self.audio_rate, self.audio_buffer)
             except pygame.error:
@@ -2797,8 +2803,7 @@ class DrumPadNative:
         self.display_surface.blit(scaled, self.display_viewport)
         pygame.display.flip()
 
-    @staticmethod
-    def initialize_mixer(device_name, rate, buffer_size):
+    def initialize_mixer(self, device_name, rate, buffer_size):
         pygame.mixer.init(
             int(rate),
             -16,
@@ -2808,6 +2813,34 @@ class DrumPadNative:
             allowedchanges=0,
         )
         pygame.mixer.set_num_channels(96)
+        self.apply_hardware_buffer(device_name, buffer_size)
+
+    def apply_hardware_buffer(self, device_name, buffer_size):
+        """Push the buffer setting down to the device, which SDL never does.
+
+        SDL buffers to its chunk size and leaves the device's own buffer frame
+        size wherever it was, so the hardware sat at 512 frames however small a
+        chunk the app asked for. That is 5.3 ms at 96 kHz that nothing was
+        reclaiming. The original is kept so it can be put back on the way out,
+        since the setting belongs to the device rather than to this app.
+        """
+        device = coreaudio.find_output(device_name)
+        if not device:
+            return None
+        if self._hal_device != device:
+            self.restore_hardware_buffer()
+            self._hal_device = device
+            self._hal_original_frames = coreaudio.buffer_frames(device)
+        applied = coreaudio.set_buffer_frames(device, buffer_size)
+        if applied is not None:
+            self.log(f"Device buffer {self._hal_original_frames} -> {applied} frames")
+        return applied
+
+    def restore_hardware_buffer(self):
+        if self._hal_device and self._hal_original_frames:
+            coreaudio.set_buffer_frames(self._hal_device, self._hal_original_frames)
+        self._hal_device = None
+        self._hal_original_frames = None
 
     @staticmethod
     def audio_output_devices():
@@ -2884,21 +2917,36 @@ class DrumPadNative:
             return native, None
         return native, current - at_native
 
+    def device_latency_ms(self, name=None):
+        """What the device would cost at this app's buffer size, from the HAL.
+
+        Reading the hardware beats opening a probe stream: it needs no device
+        access, it does not disturb whatever is playing, and it is the number
+        the device is actually running rather than a driver's summary of it.
+        """
+        breakdown = coreaudio.latency_breakdown(coreaudio.find_output(name))
+        if not breakdown:
+            return None
+        return breakdown["fixed_ms"] + self.audio_buffer / breakdown["rate"] * 1000.0
+
     def fastest_output(self):
-        """The output with the lowest measured latency, and by how much."""
+        """The output with the lowest device cost, and by how much."""
         best = None
         for name in self.audio_output_devices():
-            measured = self.measure_output_latency(name)
-            if measured is not None and (best is None or measured < best[1]):
-                best = (name, measured)
+            cost = self.device_latency_ms(name)
+            if cost is not None and (best is None or cost < best[1]):
+                best = (name, cost + self.audio_buffer * 1000.0 / max(1, self.audio_rate))
         return best
 
     def output_latency_ms(self):
-        """Buffer plus what the device adds, which is nearly all of it."""
+        """The mixer's own buffering, plus what the device adds beneath it."""
         buffer_ms = self.audio_buffer * 1000.0 / max(1, self.audio_rate)
         if self._device_latency_ms is None:
-            measured = self.measure_output_latency(self.audio_output_name)
-            self._device_latency_ms = 0.0 if measured is None else max(0.0, measured - buffer_ms)
+            device = self.device_latency_ms(self.audio_output_name)
+            if device is None:
+                measured = self.measure_output_latency(self.audio_output_name)
+                device = 0.0 if measured is None else max(0.0, measured - buffer_ms)
+            self._device_latency_ms = device
         return buffer_ms, self._device_latency_ms
 
     def reload_mixer_sounds(self):
