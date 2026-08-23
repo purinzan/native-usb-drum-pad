@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import shutil
@@ -65,6 +66,14 @@ HIT_FLASH_RANGE = 0.11
 PAD_GHOST_SCALE = 0.6
 PAD_GHOST_OFFSET = (16, 14)
 PATTERN_PAGE = 4
+MAIN_TABS = ("Main", "Step Seq", "Sampler", "Mixer", "MIDI")
+NOTE_REPEAT_RATES = ("1/4", "1/8", "1/16", "1/16T", "1/32")
+
+# What the VALUE control edits. Each entry reads and writes one parameter, so
+# the knob, the plus and minus buttons and the wheel all drive the same path.
+VALUE_TARGETS = (
+    "bpm", "swing", "volume", "metronome", "sensitivity", "pad_level",
+)
 PAD_MOVE_DELTAS = {
     pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: 4, pygame.K_DOWN: -4,
 }
@@ -1295,6 +1304,7 @@ class DrumPadNative:
         self.small_font = None
         self.big_font = None
         self.label_font = None
+        self.pad_font = None
         self.head_font = None
         self.data_font = None
         self.data_font_md = None
@@ -1400,6 +1410,13 @@ class DrumPadNative:
         self.pad_drag_active = False
         self.pad_swap_flash = {}
         self.pattern_page = 0
+        self.note_repeat_latch = False
+        self.full_level = False
+        self.metronome_level = 70
+        self.value_target = "bpm"
+        self.value_drag_from = None
+        self.main_tab = "Main"
+        self.output_peak = [0.0, 0.0]
         self.accent_name = theme.DEFAULT_ACCENT
         self.solo_pads = set()
         self.mixer_bypass = False
@@ -2592,6 +2609,7 @@ class DrumPadNative:
         self.small_font = self.faces["small"]
         self.big_font = self.faces["big"]
         self.label_font = self.faces["label"]
+        self.pad_font = self.faces["pad"]
         self.head_font = self.faces["head"]
         self.data_font = self.faces["data"]
         self.data_font_md = self.faces["data_md"]
@@ -3614,11 +3632,20 @@ class DrumPadNative:
                     running = self.handle_key(event.key, event.unicode)
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self.handle_mouse(self.window_to_logical(event.pos), pygame.key.get_mods())
+                elif event.type == pygame.MOUSEWHEEL:
+                    self.nudge_value(event.y)
                 elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                    self.value_drag_from = None
                     self.finish_pad_drag(self.window_to_logical(event.pos))
                 elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.perform_fx_open:
                     self.mouse_logical = self.window_to_logical(event.pos)
                     self.handle_perform_fx_drag(self.mouse_logical)
+                elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.value_drag_from is not None:
+                    self.mouse_logical = self.window_to_logical(event.pos)
+                    steps = (self.value_drag_from - self.mouse_logical[1]) // 4
+                    if steps:
+                        self.nudge_value(int(steps))
+                        self.value_drag_from -= int(steps) * 4
                 elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.pad_drag_from is not None:
                     self.mouse_logical = self.window_to_logical(event.pos)
                     self.update_pad_drag(self.mouse_logical)
@@ -4235,6 +4262,45 @@ class DrumPadNative:
                     self.adjust_bpm(2)
                 elif name == "tap":
                     self.tap_tempo()
+                elif name.startswith("tab_"):
+                    self.select_tab(name.removeprefix("tab_"))
+                elif name.startswith("kit_") and name.removeprefix("kit_") in KIT_SLOTS:
+                    self.select_kit(name.removeprefix("kit_"))
+                elif name == "kit_browse":
+                    self.switch_kit()
+                elif name == "latch_on":
+                    if not self.note_repeat_latch:
+                        self.toggle_note_repeat_latch()
+                elif name == "latch_off":
+                    if self.note_repeat_latch:
+                        self.toggle_note_repeat_latch()
+                elif name == "full_level":
+                    self.toggle_full_level()
+                elif name == "pad_mute":
+                    self.toggle_pad_mute()
+                elif name == "pad_solo":
+                    self.toggle_pad_solo()
+                elif name == "metro_off":
+                    if self.metronome_enabled:
+                        self.toggle_metronome()
+                elif name == "bpm_field":
+                    self.select_value_target("bpm")
+                elif name == "value_swing":
+                    self.select_value_target("swing")
+                elif name == "value_metronome":
+                    self.select_value_target("metronome")
+                elif name == "value_volume":
+                    self.select_value_target("volume")
+                elif name == "value_down":
+                    self.nudge_value(-1)
+                elif name == "value_up":
+                    self.nudge_value(1)
+                elif name == "value_knob":
+                    self.value_drag_from = pos[1]
+                elif name == "project_more":
+                    self.project_menu_open = True
+                elif name == "loop_stop":
+                    self.request_loop_command("STOP")
                 elif name == "loop_record":
                     self.request_loop_command("RECORD")
                 elif name == "loop_play":
@@ -4249,6 +4315,8 @@ class DrumPadNative:
                     self.request_loop_command("CAPTURE")
                 elif name == "loop_clear":
                     self.request_loop_command("CLEAR")
+                elif name == "loop_quantize_feel":
+                    self.feel_open = True
                 elif name == "loop_quantize":
                     self.feel_open = True
                 elif name == "loop_bars":
@@ -4300,6 +4368,91 @@ class DrumPadNative:
         self.status = f"Pad light: {name}"
         self.persist_settings_async()
         return True
+
+    def value_spec(self, name=None):
+        """Label, current value, display text and step for one VALUE target."""
+        name = name or self.value_target
+        index = self.selected_pad
+        if name == "swing":
+            return "Swing", self.feel_swing, f"{self.feel_swing}%", 1
+        if name == "volume":
+            return "Volume", round(self.volume * 100), f"{round(self.volume * 100)}%", 1
+        if name == "metronome":
+            return "Metro level", self.metronome_level, f"{self.metronome_level}", 1
+        if name == "sensitivity":
+            percent = round((self.pad_sensitivity[index] - 0.6) * 100)
+            return "Sensitivity", percent, f"{percent}", 1
+        if name == "pad_level":
+            percent = round(self.pad_volume[index] * 100)
+            return "Pad level", percent, f"{percent}%", 1
+        return "Tempo", self.bpm, f"{self.bpm}.00", 1
+
+    def nudge_value(self, steps):
+        """Move the selected VALUE target by whole steps, from any input."""
+        if not steps:
+            return
+        name = self.value_target
+        index = self.selected_pad
+        if name == "bpm":
+            if self.clock_active_source == "External":
+                self.status = "Tempo follows the external clock"
+                return
+            self.adjust_bpm(steps)
+        elif name == "swing":
+            # adjust_feel reapplies the loop from its source timing, so swing
+            # stays non destructive however many times it is turned.
+            if not self.adjust_feel("swing", steps):
+                self.feel_swing = max(50, min(75, self.feel_swing + steps))
+                self.persist_settings_async()
+        elif name == "volume":
+            self.volume = max(0.0, min(1.0, self.volume + steps * 0.01))
+            self.persist_settings_async()
+        elif name == "metronome":
+            self.metronome_level = max(0, min(100, self.metronome_level + steps))
+            self.persist_settings_async()
+        elif name == "sensitivity":
+            self.adjust_pad_sensitivity(steps * 0.01)
+        elif name == "pad_level":
+            self.push_project_history()
+            self.pad_volume[index] = max(0.0, min(1.5, self.pad_volume[index] + steps * 0.01))
+            self.persist_settings_async()
+
+    def select_value_target(self, name):
+        if name in VALUE_TARGETS:
+            self.value_target = name
+            self.status = f"Value: {self.value_spec(name)[0]}"
+            return True
+        return False
+
+    def select_tab(self, name):
+        if name not in MAIN_TABS:
+            return False
+        self.main_tab = name
+        # Screens that are still overlays open on top of Main until they move.
+        self.mixer_open = name == "Mixer"
+        self.settings_open = name == "MIDI"
+        if name == "Sampler":
+            self.sample_editor_open = bool(self.custom_sample_files[self.selected_pad])
+            if not self.sample_editor_open:
+                self.browser_open = True
+        return True
+
+    def select_kit(self, slot):
+        if slot not in KIT_SLOTS or slot == self.active_kit:
+            return False
+        while self.active_kit != slot:
+            self.switch_kit()
+        return True
+
+    def toggle_full_level(self):
+        self.full_level = not self.full_level
+        self.status = "Full level on - every hit at 127" if self.full_level else "Full level off"
+
+    def toggle_note_repeat_latch(self):
+        self.note_repeat_latch = not self.note_repeat_latch
+        if not self.note_repeat_latch:
+            self.held_triggers.clear()
+        self.status = "Note repeat latches" if self.note_repeat_latch else "Note repeat while held"
 
     def swap_pads(self, first, second):
         """Move one pad's sound onto another and bring its music along.
@@ -5426,6 +5579,16 @@ class DrumPadNative:
                     self.loop_start_ns = None
                     self.loop_pending.clear()
                     message = "Loop stopped"
+            elif command == "STOP":
+                # Unconditional, unlike PLAY which toggles: the hardware STOP
+                # always lands on stopped whatever the transport was doing.
+                self.clear_record_pending_locked()
+                self.loop_recording = False
+                self.loop_overdub = False
+                self.loop_playing = False
+                self.loop_start_ns = None
+                self.loop_pending.clear()
+                message = "Loop stopped"
             elif command == "OVERDUB":
                 self.clear_record_pending_locked()
                 if self.loop_overdub:
@@ -5973,6 +6136,8 @@ class DrumPadNative:
         # Recorded before any mapping decision: this asks whether the port is
         # alive, not whether the message landed on a pad.
         self.last_midi_event_ns = received_ns or time.perf_counter_ns()
+        if self.full_level:
+            velocity = 127
         if kind == "CC" and number == 4 and MAPPING_MODES[self.mapping_mode] == "GM Drums":
             self.hat_openness = max(0.0, min(1.0, velocity / 127.0))
             return
@@ -6015,6 +6180,10 @@ class DrumPadNative:
         self.play_pad(index, velocity, f"{kind}{number}")
         self.record_trigger_latency(received_ns)
         if kind == "N" and self.repeat_enabled:
+            if self.note_repeat_latch and key in self.held_triggers:
+                # A latched pad toggles: the second hit is what stops it.
+                del self.held_triggers[key]
+                return
             interval_ns = int(repeat_interval_seconds(self.repeat_rate, self.bpm) * 1_000_000_000)
             self.held_triggers[key] = {
                 "index": index,
@@ -6085,7 +6254,9 @@ class DrumPadNative:
                     self.loop_start_ns = received_ns - round(elapsed_beats * quarter_ns)
 
     def handle_midi_release(self, kind, number):
-        self.held_triggers.pop((kind, number), None)
+        # A latched repeat outlives the release; the next hit on that pad ends it.
+        if not self.note_repeat_latch:
+            self.held_triggers.pop((kind, number), None)
         index = self.resolve_preset_pad(kind, number)
         if index is None:
             return
@@ -6297,11 +6468,11 @@ class DrumPadNative:
 
     def pad_rects(self):
         rects = {}
-        left = 24
-        top = 88
-        width = 154
-        height = 132
-        gap = 10
+        left = 178
+        top = 84
+        width = 118
+        height = 122
+        gap = 6
         for index in range(len(PADS)):
             row = 3 - (index // 4)
             col = index % 4
@@ -6341,13 +6512,14 @@ class DrumPadNative:
         if self.grain:
             self.screen.blit(self.grain, (0, 0))
         self.draw_header()
-        if self.view_mode == "Sequence":
+        if self.main_tab == "Step Seq":
             self.draw_sequence_view()
         else:
+            self.draw_left_rail()
             self.draw_pads()
-            self.draw_loop_timeline()
-            self.draw_side_panel()
-            self.draw_pattern_strip(compact=True)
+            self.draw_right_rail()
+        self.draw_tab_bar()
+        self.draw_bottom_strip()
         if self.browser_open:
             self.draw_sample_browser()
         if self.settings_open:
@@ -6437,41 +6609,55 @@ class DrumPadNative:
         self.screen.blit(text_surface, text_surface.get_rect(center=rect.center))
 
     def draw_header(self):
-        """A 72px strip with two readouts, the way the hardware carries them.
+        """The top strip: what is loaded, how fast, and where the transport is.
 
-        The kit and the master level are the two things you look at from across
-        the room, so they get panel space and a size rather than a label on a
-        28px button.
+        Each cell is a caption over a value, so the row reads as a set of fields
+        rather than a row of buttons, and clicking a value opens the thing that
+        changes it.
         """
         bar = pygame.Rect(0, 0, WINDOW_SIZE[0], 72)
         pygame.draw.rect(self.screen, theme.PANEL, bar)
         pygame.draw.line(self.screen, theme.RULE, (0, 72), (WINDOW_SIZE[0], 72))
 
-        mark = self.label_font.render("Starrypad", True, theme.INK)
-        self.screen.blit(mark, (24, 22 - mark.get_height() // 2))
+        mark = self.label_font.render("Starrypad", True, theme.ACCENT)
+        self.screen.blit(mark, (20, 36 - mark.get_height() // 2))
 
-        connected = self.midi_input is not None
-        audio_ready = bool(pygame.mixer.get_init())
-        if connected and audio_ready:
-            name, dot, _hint = self.midi_activity()
-            self.draw_chip(pygame.Rect(124, 10, 180, 24), name, dot)
-        else:
-            self.buttons["reconnect"] = pygame.Rect(124, 9, 118, 26)
-            self.draw_button(self.buttons["reconnect"], "Reconnect", danger=True)
+        self.draw_field("project", pygame.Rect(120, 12, 156, 48), "Project", self.project_name[:18])
+        self.draw_field("bpm_field", pygame.Rect(284, 12, 96, 48), "BPM", f"{self.bpm}.00",
+                        active=self.value_target == "bpm")
+        self.buttons["tap"] = pygame.Rect(386, 24, 52, 26)
+        self.draw_button(self.buttons["tap"], "Tap", enabled=self.clock_active_source != "External")
 
-        self.buttons["project"] = pygame.Rect(24, 42, 148, 26)
-        self.draw_button(self.buttons["project"], self.project_name[:20])
-        self.buttons["view_perform"] = pygame.Rect(180, 42, 74, 26)
-        self.buttons["view_sequence"] = pygame.Rect(258, 42, 82, 26)
-        self.draw_button(self.buttons["view_perform"], "Perform", active=self.view_mode == "Perform")
-        self.draw_button(self.buttons["view_sequence"], "Sequence", active=self.view_mode == "Sequence")
-        self.buttons["settings"] = pygame.Rect(348, 42, 30, 26)
+        loop = self.loop_snapshot()
+        beat = loop["phase"]
+        position = f"{int(beat // 4) + 1}:{int(beat % 4) + 1}:{int((beat % 1) * 96):02d}"
+        self.draw_field(None, pygame.Rect(448, 12, 96, 48), "Bar", position)
+
+        pattern = f"{self.active_pattern + 1:02d} Pattern"
+        self.draw_field("pattern_scenes", pygame.Rect(552, 12, 144, 48), "Sequence", pattern)
+        kit_name = KIT_NAMES.get(self.active_kit, self.active_kit)
+        self.draw_field("kit", pygame.Rect(704, 12, 168, 48), f"Program \u00b7 Kit {self.active_kit}",
+                        kit_name, value_color=theme.ACCENT)
+
+        name, dot, _hint = self.midi_activity() if self.midi_input else ("No MIDI", theme.DANGER, "")
+        pygame.draw.circle(self.screen, dot, (890, 36), 4)
+        self.screen.blit(self.label_font.render("MIDI in", True, theme.INK_3), (900, 29))
+
+        self.buttons["settings"] = pygame.Rect(966, 22, 30, 28)
         self.draw_button(self.buttons["settings"], "", icon="gear")
+        self.buttons["project_more"] = pygame.Rect(1000, 22, 24, 28)
+        self.draw_button(self.buttons["project_more"], "\u2026")
 
-        peaking = time.perf_counter() < self.master_peak_warning_until
-        self.draw_kit_readout(pygame.Rect(624, 8, 190, 56))
-        self.draw_volume_readout(pygame.Rect(822, 8, 194, 56), peaking)
-
+    def draw_field(self, button, rect, caption, value, active=False, value_color=None):
+        """A caption over a value. Registers a button when the cell is clickable."""
+        if button:
+            self.buttons[button] = rect
+        pygame.draw.rect(self.screen, theme.GROUND, rect, border_radius=theme.RADIUS["field"])
+        pygame.draw.rect(self.screen, theme.ACCENT if active else theme.RULE, rect,
+                         width=1, border_radius=theme.RADIUS["field"])
+        self.screen.blit(self.label_font.render(caption, True, theme.INK_3), (rect.x + 10, rect.y + 5))
+        surface = self.fit_text(self.font, value, rect.width - 20, value_color or theme.INK)
+        self.screen.blit(surface, (rect.x + 10, rect.bottom - 6 - surface.get_height()))
     def draw_readout(self, rect, label):
         """The inset a value sits in, so numbers read as a display not a button.
 
@@ -6974,7 +7160,7 @@ class DrumPadNative:
             if muted or dragging_from:
                 name_color = theme.INK_3
             label = "Sample" if has_sample else SYNTH_LABELS[self.pad_synths[index]]
-            surface = self.fit_text(self.label_font, label, rect.width - 20, name_color)
+            surface = self.fit_text(self.pad_font, label, rect.width - 16, name_color)
             self.screen.blit(surface, surface.get_rect(center=rect.center))
 
             note = PAD_TO_GM_NOTE.get(index)
@@ -7022,7 +7208,7 @@ class DrumPadNative:
         pygame.draw.rect(ghost, theme.ACCENT, body, width=2, border_radius=radius)
 
         label = "Sample" if has_sample else SYNTH_LABELS[self.pad_synths[source]]
-        surface = self.fit_text(self.label_font, label, size[0] - 12, theme.ACCENT)
+        surface = self.fit_text(self.pad_font, label, size[0] - 10, theme.ACCENT)
         ghost.blit(surface, surface.get_rect(center=body.center))
 
         # Offset from the cursor like a drag cursor, so the pad underneath
@@ -7033,197 +7219,343 @@ class DrumPadNative:
         y = min(y, WINDOW_SIZE[1] - size[1] - 4)
         self.screen.blit(ghost, (x, y))
 
-    def draw_side_panel(self):
-        """One panel, four labelled sections. Rules and labels replace nested cards."""
-        panel = pygame.Rect(700, 88, 316, 558)
-        pygame.draw.rect(self.screen, theme.PANEL, panel, border_radius=theme.RADIUS["panel"])
-        pygame.draw.rect(self.screen, theme.RULE, panel, width=1, border_radius=theme.RADIUS["panel"])
-        x0, x1 = 716, 1000
+    def draw_tab_bar(self):
+        """One row of screens, replacing the overlays that used to stack up."""
+        y = 616
+        pygame.draw.line(self.screen, theme.RULE, (0, y - 8), (WINDOW_SIZE[0], y - 8))
+        width = (WINDOW_SIZE[0] - 32 - 5 * 8) // len(MAIN_TABS)
+        for index, name in enumerate(MAIN_TABS):
+            rect = pygame.Rect(16 + index * (width + 8), y, width, 36)
+            self.buttons[f"tab_{name}"] = rect
+            self.draw_button(rect, name, active=name == self.main_tab)
 
-        def section(label, y, trailing=None, trailing_color=theme.INK_3):
-            self.screen.blit(self.label_font.render(label, True, theme.INK_3), (x0, y))
-            if trailing:
-                badge = self.data_font_sm.render(trailing, True, trailing_color)
-                self.screen.blit(badge, (x1 - badge.get_width(), y + 2))
+    def draw_bottom_strip(self):
+        """Read mostly, glanceable: what is selected, how it is set, how loud."""
+        strip = pygame.Rect(16, 664, WINDOW_SIZE[0] - 32, 140)
+        pygame.draw.rect(self.screen, theme.PANEL, strip, border_radius=theme.RADIUS["panel"])
+        pygame.draw.rect(self.screen, theme.RULE, strip, width=1, border_radius=theme.RADIUS["panel"])
 
-        def divider(y):
-            pygame.draw.line(self.screen, theme.RULE_SOFT, (x0, y), (x1, y))
+        cells = [strip.x + 1 + index * (strip.width // 5) for index in range(6)]
+        for x in cells[1:-1]:
+            pygame.draw.line(self.screen, theme.RULE_SOFT, (x, strip.y + 14), (x, strip.bottom - 14))
 
-        def track(rect, ratio, color=theme.SIGNAL):
-            pygame.draw.rect(self.screen, theme.RULE, rect, border_radius=3)
-            filled = round(rect.width * max(0.0, min(1.0, ratio)))
-            if filled:
-                pygame.draw.rect(self.screen, color, pygame.Rect(rect.x, rect.y, filled, rect.height), border_radius=3)
+        self.draw_loop_cell(pygame.Rect(cells[0] + 16, strip.y + 16, strip.width // 5 - 32, 108))
+        self.draw_pad_info_cell(pygame.Rect(cells[1] + 16, strip.y + 16, strip.width // 5 - 32, 108))
+        self.draw_swing_cell(pygame.Rect(cells[2] + 16, strip.y + 16, strip.width // 5 - 32, 108))
+        self.draw_metronome_cell(pygame.Rect(cells[3] + 16, strip.y + 16, strip.width // 5 - 32, 108))
+        self.draw_output_cell(pygame.Rect(cells[4] + 16, strip.y + 16, strip.width // 5 - 32, 108))
 
-        # --- now playing ---------------------------------------------------
-        with self.state_lock:
-            last_hit = self.last_hit
-            last_velocity_value = self.last_velocity_value
-        section("Now playing", 104)
-        hit = self.fit_text(self.head_font, last_hit, 190, theme.INK)
-        self.screen.blit(hit, (x0, 122))
-        velocity = self.data_font_lg.render(f"{last_velocity_value:>3}", True, theme.ACCENT)
-        self.screen.blit(velocity, (x1 - velocity.get_width(), 120))
-        track(pygame.Rect(x0, 158, x1 - x0, 4), last_velocity_value / 127.0, theme.ACCENT)
-        trigger_p95 = self.diagnostic_snapshot()[0]
-        detail = self.data_font_sm.render(f"trig {trigger_p95:.2f} ms", True, theme.INK_3)
-        self.screen.blit(detail, (x0, 170))
+    def cell_caption(self, rect, text):
+        self.screen.blit(self.label_font.render(text, True, theme.INK_3), (rect.x, rect.y))
+        return rect.y + 20
 
-        divider(192)
+    def draw_loop_cell(self, rect):
+        """Pattern slots and the loop position.
 
-        # --- selected pad ---------------------------------------------------
-        index = self.selected_pad
-        synth = self.pad_synths[index]
-        custom_file = self.custom_sample_files[index]
-        selected_name = "Sample" if custom_file else SYNTH_LABELS[synth]
-        section(f"Pad \u00b7 {PADS[index]['name']}", 206)
-        self.buttons["mixer"] = pygame.Rect(x1 - 62, 200, 62, 26)
-        self.draw_button(self.buttons["mixer"], "Mixer", icon="sliders")
-
-        self.screen.blit(self.fit_text(self.font, selected_name, 176, theme.INK), (x0, 228))
-        self.buttons["browser"] = pygame.Rect(x1 - 138, 226, 66, 26)
-        self.buttons["sound_prev"] = pygame.Rect(x1 - 66, 226, 30, 26)
-        self.buttons["sound_next"] = pygame.Rect(x1 - 32, 226, 32, 26)
-        self.draw_button(self.buttons["browser"], "Browse")
-        self.draw_button(self.buttons["sound_prev"], "", icon="chevron_left")
-        self.draw_button(self.buttons["sound_next"], "", icon="chevron_right")
-
-        self.screen.blit(self.label_font.render("Sensitivity", True, theme.INK_3), (x0, 258))
-        sensitivity_ratio = (self.pad_sensitivity[index] - 0.6) / 1.0
-        track(pygame.Rect(x0 + 92, 264, 96, 4), sensitivity_ratio)
-        self.buttons["sens_down"] = pygame.Rect(x1 - 66, 254, 30, 26)
-        self.buttons["sens_up"] = pygame.Rect(x1 - 32, 254, 32, 26)
-        self.draw_button(self.buttons["sens_down"], "-")
-        self.draw_button(self.buttons["sens_up"], "+")
-
-        self.draw_pad_mix_strip(x0, x1, 290)
-
-        sample_detail = self.sampler.detail_snapshot()
-        recording = sample_detail["active"]
-        input_level = sample_detail["level"]
-        self.buttons["sample"] = pygame.Rect(x0, 332, 128, 30)
-        self.buttons["sample_edit"] = pygame.Rect(x0 + 134, 332, 68, 30)
-        self.buttons["sample_clear"] = pygame.Rect(x0 + 208, 332, 76, 30)
-        sample_label = (
-            "Cancel"
-            if recording and sample_detail["auto_start"] and not sample_detail["triggered"]
-            else "Stop"
-            if recording
-            else "Sample"
-        )
-        self.draw_button(
-            self.buttons["sample"], sample_label, danger=recording,
-            enabled=recording or self.audio_inputs_available, icon="microphone",
-        )
-        self.draw_button(self.buttons["sample_edit"], "Edit", enabled=bool(custom_file), icon="waveform")
-        self.draw_button(self.buttons["sample_clear"], "Use Kit", enabled=bool(custom_file))
-        sample_track = pygame.Rect(x0, 372, x1 - x0, 4)
-        if recording:
-            track(sample_track, min(1.0, input_level * 3.0), theme.DANGER)
-        elif custom_file:
-            track(sample_track, 1.0)
-        elif self.sample_processing:
-            track(sample_track, 0.2 + (time.perf_counter() % 1.0) * 0.35)
-        else:
-            pygame.draw.rect(self.screen, theme.RULE, sample_track, border_radius=3)
-
-        divider(390)
-
-        # --- tempo -----------------------------------------------------------
-        external_clock = self.clock_active_source == "External"
-        section("Tempo", 404, "EXT" if external_clock else None, theme.SIGNAL)
-        bpm_value = self.data_font_lg.render(f"{self.bpm}", True, theme.INK)
-        self.screen.blit(bpm_value, (x0, 420))
-        self.screen.blit(
-            self.label_font.render("bpm", True, theme.INK_3),
-            (x0 + bpm_value.get_width() + 8, 434),
-        )
-        self.buttons["bpm_down"] = pygame.Rect(x1 - 170, 424, 30, 28)
-        self.buttons["bpm_up"] = pygame.Rect(x1 - 136, 424, 30, 28)
-        self.buttons["tap"] = pygame.Rect(x1 - 98, 424, 98, 28)
-        self.draw_button(self.buttons["bpm_down"], "-", enabled=not external_clock)
-        self.draw_button(self.buttons["bpm_up"], "+", enabled=not external_clock)
-        self.draw_button(self.buttons["tap"], "Tap Tempo", enabled=not external_clock)
-
-        self.buttons["repeat"] = pygame.Rect(x0, 460, 96, 28)
-        self.buttons["repeat_rate"] = pygame.Rect(x0 + 102, 460, 60, 28)
-        self.buttons["metro"] = pygame.Rect(x0 + 168, 460, 116, 28)
-        self.draw_button(self.buttons["repeat"], "Repeat", active=self.repeat_enabled, icon="repeat")
-        self.draw_button(self.buttons["repeat_rate"], self.repeat_rate)
-        self.draw_button(self.buttons["metro"], "Metronome", active=self.metronome_enabled, icon="metronome")
-
-        divider(504)
-
-        # --- loop -------------------------------------------------------------
+        The header already names the program, so this cell carries the thing
+        that has nowhere else to live on the performance surface.
+        """
         loop = self.loop_snapshot()
         state = (
-            f"COUNT {loop['count_remaining']}"
-            if loop["record_pending"] and loop["count_remaining"]
-            else "WAIT"
-            if loop["record_pending"]
-            else "REC"
-            if loop["recording"] and not loop["overdub"]
-            else "OVERDUB"
-            if loop["overdub"]
-            else "PLAY"
-            if loop["playing"]
-            else "STOP"
+            "REC" if loop["recording"] or loop["record_pending"]
+            else "PLAY" if loop["playing"] else "STOP"
         )
-        state_color = (
+        colour = (
             theme.DANGER if loop["recording"] or loop["record_pending"]
-            else theme.ACCENT if loop["playing"]
-            else theme.INK_3
+            else theme.ACCENT if loop["playing"] else theme.INK_3
         )
-        section("Loop", 518, state, state_color)
+        self.cell_caption(rect, "Loop")
+        badge = self.data_font_sm.render(state, True, colour)
+        self.screen.blit(badge, (rect.right - badge.get_width(), rect.y + 2))
 
-        self.buttons["loop_record"] = pygame.Rect(x0, 536, 100, 30)
-        self.buttons["loop_play"] = pygame.Rect(x0 + 106, 536, 34, 30)
-        self.buttons["loop_overdub"] = pygame.Rect(x0 + 146, 536, 34, 30)
-        self.buttons["loop_capture"] = pygame.Rect(x0 + 186, 536, 98, 30)
-        record_label = "Cancel" if loop["record_pending"] else "Record"
-        self.draw_button(
-            self.buttons["loop_record"], record_label,
-            danger=loop["record_pending"] or (loop["recording"] and not loop["overdub"]),
-            icon="record",
-        )
-        self.draw_button(self.buttons["loop_play"], "", active=loop["playing"], icon="play")
-        self.draw_button(self.buttons["loop_overdub"], "", active=loop["overdub"], icon="overdub")
-        self.draw_button(self.buttons["loop_capture"], "Capture", enabled=loop["can_capture"])
+        page = self.pattern_page
+        slots = range(page * PATTERN_PAGE, min(PATTERN_COUNT, (page + 1) * PATTERN_PAGE))
+        width, gap = 34, 4
+        for column, index in enumerate(slots):
+            slot = pygame.Rect(rect.x + column * (width + gap), rect.y + 22, width, 28)
+            self.buttons[f"pattern_{index}"] = slot
+            self.draw_button(
+                slot, f"{index + 1}",
+                active=index == self.active_pattern,
+                danger=index == self.pending_pattern,
+            )
+            if self.patterns[index] is not None and index not in (self.active_pattern, self.pending_pattern):
+                pygame.draw.circle(self.screen, theme.SIGNAL, (slot.right - 6, slot.top + 6), 2)
+        pages = (PATTERN_COUNT + PATTERN_PAGE - 1) // PATTERN_PAGE
+        self.buttons["pattern_page"] = pygame.Rect(rect.x + 4 * (width + gap), rect.y + 22, 32, 28)
+        self.draw_button(self.buttons["pattern_page"], f"{page + 1}/{pages}")
 
-        self.buttons["loop_undo"] = pygame.Rect(x0, 572, 34, 30)
-        self.buttons["loop_redo"] = pygame.Rect(x0 + 40, 572, 34, 30)
-        self.buttons["loop_clear"] = pygame.Rect(x0 + 80, 572, 56, 30)
-        self.buttons["loop_quantize"] = pygame.Rect(x0 + 142, 572, 56, 30)
-        self.buttons["loop_bars"] = pygame.Rect(x0 + 204, 572, 40, 30)
-        self.buttons["perform_fx"] = pygame.Rect(x0 + 250, 572, 34, 30)
-        self.draw_button(self.buttons["loop_undo"], "", enabled=loop["can_undo"], icon="undo")
-        self.draw_button(self.buttons["loop_redo"], "", enabled=loop["can_redo"], icon="redo")
-        self.draw_button(self.buttons["loop_clear"], "Clear")
-        self.draw_button(self.buttons["loop_quantize"], "Feel")
+        track = pygame.Rect(rect.x, rect.y + 60, rect.width, 16)
+        pygame.draw.rect(self.screen, theme.GROUND, track, border_radius=3)
+        pygame.draw.rect(self.screen, theme.RULE, track, width=1, border_radius=3)
+        total_beats = loop["bars"] * 4.0
+        for beat in range(1, int(total_beats)):
+            x = track.x + round(track.width * beat / total_beats)
+            downbeat = beat % 4 == 0
+            pygame.draw.line(
+                self.screen, theme.RULE if downbeat else theme.RULE_SOFT,
+                (x, track.top + (1 if downbeat else 5)), (x, track.bottom - (1 if downbeat else 5)),
+            )
+        for beat, pad_index, velocity in loop["events"]:
+            x = track.x + round(track.width * beat / total_beats)
+            height = 4 + round((velocity / 127.0) * 8)
+            pygame.draw.rect(
+                self.screen, theme.hue_hint(synth_color(self.pad_synths[pad_index], PADS[pad_index]["color"])),
+                pygame.Rect(x - 1, track.centery - height // 2, 2, height),
+            )
+        if loop["playing"] or loop["recording"]:
+            x = track.x + round(track.width * loop["phase"] / total_beats)
+            pygame.draw.line(self.screen, theme.ACCENT, (x, track.top + 1), (x, track.bottom - 1), 2)
+
+        self.buttons["loop_bars"] = pygame.Rect(rect.x, rect.bottom - 30, 52, 28)
+        self.buttons["loop_clear"] = pygame.Rect(rect.x + 58, rect.bottom - 30, 56, 28)
+        self.buttons["loop_quantize_feel"] = pygame.Rect(rect.x + 120, rect.bottom - 30, 52, 28)
         self.draw_button(self.buttons["loop_bars"], f"{loop['bars']}B")
-        self.draw_button(
-            self.buttons["perform_fx"], "", icon="zap",
-            active=any(self.perform_fx.values()) and not self.perform_fx_bypass,
-        )
+        self.draw_button(self.buttons["loop_clear"], "Clear", enabled=bool(loop["events"]))
+        self.draw_button(self.buttons["loop_quantize_feel"], "Feel", enabled=bool(loop["events"]))
 
-        self.buttons["share"] = pygame.Rect(x0, 608, x1 - x0, 30)
-        self.draw_button(
-            self.buttons["share"],
-            "Exporting..." if loop["exporting"] else "Share",
-            enabled=not loop["exporting"] and bool(loop["events"]),
-            icon="share",
+    def draw_program_cell(self, rect):
+        y = self.cell_caption(rect, "Program")
+        name = KIT_NAMES.get(self.active_kit, self.active_kit)
+        self.screen.blit(self.fit_text(self.head_font, name, rect.width, theme.ACCENT), (rect.x, y))
+        self.screen.blit(
+            self.small_font.render(f"Kit {self.active_kit}  \u00b7  {len(KIT)} sounds", True, theme.INK_3),
+            (rect.x, y + 32),
         )
+        self.buttons["kit_browse"] = pygame.Rect(rect.x, rect.bottom - 32, rect.width, 30)
+        self.draw_button(self.buttons["kit_browse"], "Browse", icon="folder")
 
+    def draw_pad_info_cell(self, rect):
+        index = self.selected_pad
+        y = self.cell_caption(rect, "Pad info")
+        custom = self.custom_sample_files[index]
+        label = "Sample" if custom else SYNTH_LABELS[self.pad_synths[index]]
+        self.screen.blit(self.fit_text(self.font, label, rect.width, theme.INK), (rect.x, y))
+
+        note = PAD_TO_GM_NOTE.get(index)
+        self.screen.blit(self.label_font.render("Note", True, theme.INK_3), (rect.x, y + 30))
+        self.screen.blit(
+            self.data_font.render(str(note) if note is not None else "--", True, theme.INK_2),
+            (rect.x + 54, y + 28),
+        )
         with self.state_lock:
-            notice = self.surface_notice if time.perf_counter() < self.surface_notice_until else ""
-        midi_hint = self.midi_activity()[2] if self.midi_input is not None else ""
-        surface_status = notice or midi_hint or self.sample_status or self.status
-        if not surface_status and loop["last_export"] != "--":
-            surface_status = "Export complete"
-        if surface_status:
-            failed = any(word in surface_status.casefold() for word in ("failed", "unavailable", "no ", "disconnect"))
-            color = theme.DANGER if failed else theme.INK_2
-            self.screen.blit(self.fit_text(self.small_font, surface_status, 316, color), (700, 786))
+            velocity = self.last_velocity_value
+        self.screen.blit(self.label_font.render("Velocity", True, theme.INK_3), (rect.x, y + 54))
+        track = pygame.Rect(rect.x + 54, y + 60, rect.width - 54, 4)
+        pygame.draw.rect(self.screen, theme.RULE, track, border_radius=2)
+        filled = round(track.width * velocity / 127.0)
+        if filled:
+            pygame.draw.rect(self.screen, theme.ACCENT, pygame.Rect(track.x, track.y, filled, 4), border_radius=2)
+        self.buttons["sample"] = pygame.Rect(rect.x, rect.bottom - 32, rect.width, 30)
+        self.draw_button(
+            self.buttons["sample"], "Sample", icon="microphone",
+            enabled=self.audio_inputs_available,
+        )
+
+    def draw_swing_cell(self, rect):
+        y = self.cell_caption(rect, "Swing")
+        self.buttons["value_swing"] = rect
+        active = self.value_target == "swing"
+        value = self.data_font_lg.render(f"{self.feel_swing}%", True, theme.ACCENT if active else theme.INK)
+        self.screen.blit(value, (rect.x, y))
+        bar = pygame.Rect(rect.x, y + 46, rect.width, 4)
+        pygame.draw.rect(self.screen, theme.RULE, bar, border_radius=2)
+        filled = round(bar.width * (self.feel_swing - 50) / 25.0)
+        if filled:
+            pygame.draw.rect(self.screen, theme.SIGNAL, pygame.Rect(bar.x, bar.y, filled, 4), border_radius=2)
+        self.screen.blit(
+            self.small_font.render("Straight at 50" if self.feel_swing == 50 else "Shuffled", True, theme.INK_3),
+            (rect.x, y + 56),
+        )
+
+    def draw_metronome_cell(self, rect):
+        y = self.cell_caption(rect, "Metronome")
+        self.buttons["metro"] = pygame.Rect(rect.x, y, 62, 30)
+        self.buttons["metro_off"] = pygame.Rect(rect.x + 70, y, 62, 30)
+        self.draw_button(self.buttons["metro"], "On", danger=self.metronome_enabled)
+        self.draw_button(self.buttons["metro_off"], "Off", active=not self.metronome_enabled)
+        self.buttons["value_metronome"] = pygame.Rect(rect.x, y + 40, rect.width, 40)
+        active = self.value_target == "metronome"
+        self.screen.blit(self.label_font.render("Level", True, theme.INK_3), (rect.x, y + 44))
+        level = self.data_font.render(str(self.metronome_level), True, theme.ACCENT if active else theme.INK)
+        self.screen.blit(level, (rect.x + 54, y + 42))
+        bar = pygame.Rect(rect.x, y + 68, rect.width, 4)
+        pygame.draw.rect(self.screen, theme.RULE, bar, border_radius=2)
+        filled = round(bar.width * self.metronome_level / 100.0)
+        if filled:
+            pygame.draw.rect(self.screen, theme.SIGNAL, pygame.Rect(bar.x, bar.y, filled, 4), border_radius=2)
+
+    def draw_output_cell(self, rect):
+        y = self.cell_caption(rect, "Output")
+        peaking = time.perf_counter() < self.master_peak_warning_until
+        for channel in range(2):
+            meter = pygame.Rect(rect.x + channel * 22, y, 14, 62)
+            pygame.draw.rect(self.screen, theme.GROUND, meter, border_radius=2)
+            level = max(0.0, min(1.0, self.output_peak[channel]))
+            filled = round(meter.height * level)
+            if filled:
+                colour = theme.DANGER if level > 0.92 else theme.ACCENT if level > 0.7 else theme.SIGNAL
+                pygame.draw.rect(
+                    self.screen, colour,
+                    pygame.Rect(meter.x, meter.bottom - filled, meter.width, filled), border_radius=2,
+                )
+            self.screen.blit(
+                self.label_font.render("L" if channel == 0 else "R", True, theme.INK_3),
+                (meter.x + 3, meter.bottom + 4),
+            )
+
+        self.buttons["value_volume"] = pygame.Rect(rect.x + 60, y, rect.width - 60, 40)
+        active = self.value_target == "volume"
+        self.screen.blit(self.label_font.render("Master", True, theme.INK_3), (rect.x + 60, y))
+        master = self.data_font_lg.render(
+            f"{round(self.volume * 100)}", True,
+            theme.DANGER if peaking else theme.ACCENT if active else theme.INK,
+        )
+        self.screen.blit(master, (rect.x + 60, y + 16))
+        self.screen.blit(
+            self.small_font.render("PEAK" if peaking else "%", True,
+                                   theme.DANGER if peaking else theme.INK_3),
+            (rect.x + 62 + master.get_width(), y + 30),
+        )
+        with self.metrics_lock:
+            depth = self.max_queue_depth
+        load = min(1.0, depth / 16.0)
+        self.screen.blit(self.label_font.render("Queue", True, theme.INK_3), (rect.x + 60, y + 62))
+        bar = pygame.Rect(rect.x + 60, y + 82, rect.width - 60, 4)
+        pygame.draw.rect(self.screen, theme.RULE, bar, border_radius=2)
+        filled = round(bar.width * load)
+        if filled:
+            pygame.draw.rect(
+                self.screen, theme.DANGER if load > 0.6 else theme.SIGNAL,
+                pygame.Rect(bar.x, bar.y, filled, 4), border_radius=2,
+            )
+
+    def draw_left_rail(self):
+        """Note repeat, latch and full level: the three things you reach for mid take."""
+        rail = pygame.Rect(16, 84, 152, 522)
+        pygame.draw.rect(self.screen, theme.PANEL, rail, border_radius=theme.RADIUS["panel"])
+        pygame.draw.rect(self.screen, theme.RULE, rail, width=1, border_radius=theme.RADIUS["panel"])
+        x0, width = 30, 124
+
+        self.screen.blit(self.label_font.render("Note repeat", True, theme.INK_3), (x0, 100))
+        self.buttons["repeat_rate"] = pygame.Rect(x0, 120, width, 32)
+        self.draw_button(self.buttons["repeat_rate"], self.repeat_rate, active=self.repeat_enabled)
+        self.buttons["repeat"] = pygame.Rect(x0, 158, width, 30)
+        self.draw_button(self.buttons["repeat"], "Repeat", active=self.repeat_enabled, icon="repeat")
+
+        self.screen.blit(self.label_font.render("Latch", True, theme.INK_3), (x0, 206))
+        self.buttons["latch_on"] = pygame.Rect(x0, 226, 58, 30)
+        self.buttons["latch_off"] = pygame.Rect(x0 + 66, 226, 58, 30)
+        self.draw_button(self.buttons["latch_on"], "On", danger=self.note_repeat_latch)
+        self.draw_button(self.buttons["latch_off"], "Off", active=not self.note_repeat_latch)
+
+        self.screen.blit(self.label_font.render("Kit", True, theme.INK_3), (x0, 280))
+        for column, slot in enumerate(KIT_SLOTS):
+            rect = pygame.Rect(x0 + column * 32, 300, 28, 30)
+            self.buttons[f"kit_{slot}"] = rect
+            self.draw_button(rect, slot, active=slot == self.active_kit)
+
+        self.buttons["full_level"] = pygame.Rect(x0, 372, width, 40)
+        self.draw_button(self.buttons["full_level"], "Full Level", danger=self.full_level)
+
+        self.screen.blit(self.label_font.render("Selected pad", True, theme.INK_3), (x0, 440))
+        index = self.selected_pad
+        name = self.fit_text(self.font, PADS[index]["name"], width, theme.INK)
+        self.screen.blit(name, (x0, 458))
+        self.buttons["pad_mute"] = pygame.Rect(x0, 490, 58, 30)
+        self.buttons["pad_solo"] = pygame.Rect(x0 + 66, 490, 58, 30)
+        self.draw_button(self.buttons["pad_mute"], "Mute", danger=self.pad_mute[index])
+        self.draw_button(self.buttons["pad_solo"], "Solo", active=index in self.solo_pads)
+
+        self.buttons["browser"] = pygame.Rect(x0, 546, width, 34)
+        self.draw_button(self.buttons["browser"], "Browse", icon="folder")
+
+    def draw_right_rail(self):
+        """Edit actions, the VALUE control and the transport."""
+        actions = pygame.Rect(672, 84, 124, 250)
+        pygame.draw.rect(self.screen, theme.PANEL, actions, border_radius=theme.RADIUS["panel"])
+        pygame.draw.rect(self.screen, theme.RULE, actions, width=1, border_radius=theme.RADIUS["panel"])
+        loop = self.loop_snapshot()
+        for row, (key, label, icon, enabled) in enumerate((
+            ("mixer", "Mixer", "sliders", True),
+            ("loop_quantize", "Quantize", "magnet", bool(loop["events"])),
+            ("loop_undo", "Undo", "undo", loop["can_undo"]),
+            ("loop_redo", "Redo", "redo", loop["can_redo"]),
+        )):
+            rect = pygame.Rect(686, 100 + row * 58, 96, 44)
+            self.buttons[key] = rect
+            self.draw_button(rect, label, icon=icon, enabled=enabled)
+
+        self.draw_value_panel(pygame.Rect(806, 84, 218, 250))
+        self.draw_transport(pygame.Rect(672, 346, 352, 260))
+
+    def draw_value_panel(self, rect):
+        pygame.draw.rect(self.screen, theme.PANEL, rect, border_radius=theme.RADIUS["panel"])
+        pygame.draw.rect(self.screen, theme.RULE, rect, width=1, border_radius=theme.RADIUS["panel"])
+        label, _value, text, _step = self.value_spec()
+        caption = self.label_font.render(f"Value \u00b7 {label}", True, theme.INK_3)
+        self.screen.blit(caption, (rect.centerx - caption.get_width() // 2, rect.y + 10))
+
+        centre = (rect.centerx, rect.y + 104)
+        radius = 52
+        self.buttons["value_knob"] = pygame.Rect(centre[0] - radius, centre[1] - radius, radius * 2, radius * 2)
+        pygame.draw.circle(self.screen, theme.PANEL_2, centre, radius)
+        pygame.draw.circle(self.screen, theme.RULE, centre, radius, 2)
+        for step in range(24):
+            angle = math.radians(-210 + step * (240 / 23))
+            inner = radius - (10 if step % 6 == 0 else 6)
+            start = (centre[0] + math.cos(angle) * inner, centre[1] + math.sin(angle) * inner)
+            end = (centre[0] + math.cos(angle) * (radius - 3), centre[1] + math.sin(angle) * (radius - 3))
+            pygame.draw.line(self.screen, theme.RULE if step % 6 else theme.INK_3, start, end, 1)
+        pointer = math.radians(-210 + self.value_fraction() * 240)
+        tip = (centre[0] + math.cos(pointer) * (radius - 16), centre[1] + math.sin(pointer) * (radius - 16))
+        pygame.draw.line(self.screen, theme.ACCENT, centre, tip, 3)
+        pygame.draw.circle(self.screen, theme.ACCENT, tip, 4)
+
+        readout = self.data_font_lg.render(text, True, theme.INK)
+        self.screen.blit(readout, (rect.centerx - readout.get_width() // 2, rect.y + 168))
+        self.buttons["value_down"] = pygame.Rect(rect.x + 18, rect.bottom - 46, 84, 34)
+        self.buttons["value_up"] = pygame.Rect(rect.right - 102, rect.bottom - 46, 84, 34)
+        self.draw_button(self.buttons["value_down"], "-")
+        self.draw_button(self.buttons["value_up"], "+")
+
+    def value_fraction(self):
+        ranges = {
+            "bpm": (BPM_MIN, BPM_MAX), "swing": (50, 75), "volume": (0, 100),
+            "metronome": (0, 100), "sensitivity": (0, 100), "pad_level": (0, 150),
+        }
+        low, high = ranges.get(self.value_target, (0, 100))
+        value = self.value_spec()[1]
+        return max(0.0, min(1.0, (value - low) / max(1, high - low)))
+
+    def draw_transport(self, rect):
+        pygame.draw.rect(self.screen, theme.PANEL, rect, border_radius=theme.RADIUS["panel"])
+        pygame.draw.rect(self.screen, theme.RULE, rect, width=1, border_radius=theme.RADIUS["panel"])
+        self.screen.blit(self.label_font.render("Transport", True, theme.INK_3), (rect.x + 16, rect.y + 10))
+
+        loop = self.loop_snapshot()
+        recording = loop["record_pending"] or (loop["recording"] and not loop["overdub"])
+        cells = (
+            ("loop_record", "Rec", "record", recording, loop["can_capture"] or True),
+            ("loop_overdub", "Overdub", "overdub", loop["overdub"], True),
+            ("loop_play", "Play", "play", loop["playing"], True),
+            ("loop_stop", "Stop", "stop", False, True),
+        )
+        for index, (key, label, icon, lit, enabled) in enumerate(cells):
+            cell = pygame.Rect(
+                rect.x + 16 + (index % 2) * 168, rect.y + 40 + (index // 2) * 92, 152, 80,
+            )
+            self.buttons[key] = cell
+            danger = lit and key in ("loop_record", "loop_overdub")
+            self.draw_button(cell, label, active=lit and not danger, danger=danger, enabled=enabled, icon=icon)
+
+        self.buttons["loop_capture"] = pygame.Rect(rect.x + 16, rect.bottom - 46, 152, 34)
+        self.buttons["share"] = pygame.Rect(rect.x + 184, rect.bottom - 46, 152, 34)
+        self.draw_button(self.buttons["loop_capture"], "Capture", enabled=loop["can_capture"])
+        self.draw_button(
+            self.buttons["share"], "Exporting..." if loop["exporting"] else "Share",
+            enabled=not loop["exporting"] and bool(loop["events"]), icon="share",
+        )
 
     def draw_pad_mix_strip(self, x0, x1, y):
         """The selected pad's mix, read only, so the Mixer is not the only way to see it.
@@ -7771,47 +8103,6 @@ class DrumPadNative:
         self.draw_button(self.settings_buttons["calibration_cancel"], "Cancel")
         self.draw_button(self.settings_buttons["calibration_reset"], "Use Default")
 
-    def draw_loop_timeline(self):
-        """The loop as a bar with real beat divisions, not a hairline."""
-        loop = self.loop_snapshot()
-        left = 24
-        width = 992
-        top = 664
-        total_beats = loop["bars"] * 4.0
-
-        state = "REC" if loop["recording"] else "PLAY" if loop["playing"] else "STOP"
-        title = self.label_font.render(f"Loop \u00b7 {loop['bars']} bar", True, theme.INK_3)
-        self.screen.blit(title, (left, top))
-        state_color = theme.DANGER if loop["recording"] else theme.ACCENT if loop["playing"] else theme.INK_3
-        badge = self.data_font_sm.render(state, True, state_color)
-        self.screen.blit(badge, (left + width - badge.get_width(), top + 2))
-
-        track = pygame.Rect(left, top + 22, width, 42)
-        pygame.draw.rect(self.screen, theme.PANEL, track, border_radius=theme.RADIUS["field"])
-        pygame.draw.rect(self.screen, theme.RULE, track, width=1, border_radius=theme.RADIUS["field"])
-
-        for beat in range(1, int(total_beats)):
-            x = left + round((beat / total_beats) * width)
-            downbeat = beat % 4 == 0
-            pygame.draw.line(
-                self.screen,
-                theme.RULE if downbeat else theme.RULE_SOFT,
-                (x, track.top + (3 if downbeat else 12)),
-                (x, track.bottom - (3 if downbeat else 12)),
-                1,
-            )
-
-        for beat, pad_index, velocity in loop["events"]:
-            x = left + round((beat / total_beats) * width)
-            height = 6 + round((velocity / 127.0) * 22)
-            marker = pygame.Rect(x - 1, track.centery - height // 2, 3, height)
-            pygame.draw.rect(self.screen, theme.hue_hint(PADS[pad_index]["color"]), marker, border_radius=1)
-
-        if loop["playing"] or loop["recording"]:
-            playhead_x = left + round((loop["phase"] / total_beats) * width)
-            played = pygame.Rect(track.x + 1, track.y + 1, max(0, playhead_x - track.x - 1), track.height - 2)
-            pygame.draw.rect(self.screen, theme.ACCENT_SOFT, played, border_radius=theme.RADIUS["field"])
-            pygame.draw.line(self.screen, theme.ACCENT, (playhead_x, track.top + 1), (playhead_x, track.bottom - 1), 2)
 
 def main():
     mutex = acquire_single_instance()

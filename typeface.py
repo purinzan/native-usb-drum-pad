@@ -112,7 +112,8 @@ class Face:
 def build():
     """Every face the panel draws with, created once after `pygame.font.init()`."""
     return {
-        "label": Face(LABEL, 15, tracking=1.6, upper=True),   # section + pad labels
+        "label": Face(LABEL, 15, tracking=1.6, upper=True),   # section labels
+        "pad": Face(LABEL, 14, tracking=0.8, upper=True),     # pad faces, narrower
         "ui": Face(UI, 18),                                   # buttons, body
         "small": Face(UI, 16),                                # secondary text
         "head": Face(HEAD, 25),                               # panel headings

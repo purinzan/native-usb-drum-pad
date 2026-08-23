@@ -9,6 +9,11 @@ sets: the trimmed Salamander Drumkit, a CC0 TR-808 set, and generated glass.
 
 ![Kit B](ui-kit-b.png)
 
+The performance surface is laid out as a hardware panel: a field row across the
+top, note repeat and kit on the left rail, the pads in the centre, edit actions
+and a VALUE control on the right, a row of screens along the bottom, and a strip
+of readouts under that.
+
 The panel is graphite and colour means state, not identity: amber marks the pad
 sounding now, the pad selected, and an armed Record. A pad carries one name, and
 it is the sound it will play — after the kit is rearranged a fixed position name
@@ -152,6 +157,21 @@ Feedback the panel gives you:
 - Status messages appear at the bottom right, failures in red.
 - Launching a second copy prints `STARRYPAD is already running` instead of
   exiting without a word.
+
+## Not built yet
+
+The panel is modelled on an MPC, and four things from that model are missing.
+They are listed because knowing what is absent is worth more than discovering it:
+
+| | Why it is not here |
+| --- | --- |
+| Pad banks A-D (64 pads) | Every per-pad list is 16 long. Widening them to 64 with a bank offset touches triggering, kit profiles, recorded events and persistence at once. |
+| Multiple tracks | The app plays one part. Tracks need their own routing, mute and solo, and a mixer that knows about them. |
+| GRID note editor | Step Seq covers rhythm on a grid; a piano-roll style editor with note length and drag is a screen that does not exist yet. |
+| Per-pad sample layers | Velocity layers are defined in the kit rather than being editable per pad. |
+
+The MIDI tab currently opens the existing Settings panel, and the Sampler tab
+opens the sample editor or the browser, rather than being screens of their own.
 
 ## Design
 
