@@ -182,6 +182,7 @@ opens the sample editor or the browser, rather than being screens of their own.
 | `tools/make_assets.py` | Regenerates the grain tile and the app icons, including `starrypad.icns` and `starrypad.ico`. |
 | `tools/build_kit_b.py` | Rebuilds `samples/tr808/` from the CC0 pack and generates `samples/impact/`. |
 | `tools/trim_samples.py` | Reports or removes dead air at the front of any shipped sample. |
+| `tools/audio_latency.py` | Measures what every audio output actually costs, and names the fastest. |
 
 Fonts are Barlow, Barlow Condensed and IBM Plex Mono, all under the SIL Open
 Font License; the licence texts sit beside them in `assets/fonts/`.
