@@ -94,7 +94,11 @@ Controls:
 - `Share`: export a 48 kHz stereo Master WAV, MIDI, aligned 16-pad stems, or a portable Project Bundle containing the project and its used samples.
 - `Export MIDI`: write a Standard MIDI file using General MIDI drum notes.
 - `L`: record. `O`: overdub. `C`: capture. `U`: undo. `Y`: redo. `Q`: quantize.
-- `Esc`: closes the open panel; with nothing open it quits.
+- `Esc`: closes the open panel. With nothing open it names the quit shortcut
+  rather than quitting, so reaching for the usual cancel key mid-take does not
+  end the session.
+- `Cmd-Q` on macOS, `Ctrl-Q` elsewhere: quit. macOS also accepts `Ctrl` for the
+  other app chords, so `Cmd-Z` and `Ctrl-Z` both undo.
 
 Feedback the panel gives you:
 
