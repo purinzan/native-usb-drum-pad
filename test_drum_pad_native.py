@@ -620,6 +620,35 @@ class MappingTests(unittest.TestCase):
         self.assertIsNone(self.app.resolve_preset_pad("CC", 20))
 
 
+class QuitShortcutTests(unittest.TestCase):
+    """Esc closes panels; quitting takes the platform chord."""
+
+    def setUp(self):
+        import pygame
+
+        self.pygame = pygame
+        self.app = drum.DrumPadNative(settings_path=None)
+
+    def press(self, key, mods=0):
+        with mock.patch.object(self.pygame.key, "get_mods", return_value=mods):
+            return self.app.handle_key(key)
+
+    def test_escape_with_nothing_open_names_the_quit_chord_instead_of_quitting(self):
+        self.assertTrue(self.press(self.pygame.K_ESCAPE))
+        self.assertIn(drum.QUIT_SHORTCUT.casefold(), self.app.status.casefold())
+
+    def test_escape_closes_the_open_panel_first(self):
+        self.app.settings_open = True
+        self.assertTrue(self.press(self.pygame.K_ESCAPE))
+        self.assertFalse(self.app.settings_open)
+
+    def test_command_q_quits(self):
+        self.assertFalse(self.press(self.pygame.K_q, drum.COMMAND_MODIFIER))
+
+    def test_plain_q_still_quantizes_rather_than_quitting(self):
+        self.assertTrue(self.press(self.pygame.K_q))
+
+
 class MidiCallbackTests(unittest.TestCase):
     """Decoding is shared by every backend, so this runs on Windows and macOS."""
 

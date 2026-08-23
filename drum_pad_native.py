@@ -20,6 +20,7 @@ import theme
 import typeface
 from platform_backend import (
     AUDIO_DRIVER,
+    IS_MACOS,
     MidiInput,
     MidiOutput,
     acquire_single_instance,
@@ -56,6 +57,10 @@ MIDI_HEALTH_CHECK_SECONDS = 2.0
 PERFORMANCE_BUFFER_SECONDS = 120.0
 PERFORMANCE_PHRASE_GAP_SECONDS = 2.0
 MIDI_SILENCE_HINT_SECONDS = 4.0
+# macOS puts app shortcuts on Command; accept Control there too rather than
+# retiring a chord anyone may already have in their fingers.
+COMMAND_MODIFIER = (pygame.KMOD_META | pygame.KMOD_CTRL) if IS_MACOS else pygame.KMOD_CTRL
+QUIT_SHORTCUT = "Cmd-Q" if IS_MACOS else "Ctrl-Q"
 AUDIO_HEALTH_CHECK_SECONDS = 2.0
 AUDIO_MODES = ("Low latency", "Stable")
 AUDIO_RATES = (48000, 44100)
@@ -3454,7 +3459,9 @@ class DrumPadNative:
 
     def handle_key(self, key, text=""):
         modifiers = pygame.key.get_mods()
-        if modifiers & pygame.KMOD_CTRL:
+        if modifiers & COMMAND_MODIFIER:
+            if key == pygame.K_q:
+                return False
             if key == pygame.K_z:
                 self.redo_project_edit() if modifiers & pygame.KMOD_SHIFT else self.undo_project_edit()
             elif key == pygame.K_y:
@@ -3524,7 +3531,8 @@ class DrumPadNative:
                     return True
                 self.settings_open = False
                 return True
-            return False
+            self.status = f"Press {QUIT_SHORTCUT} to quit"
+            return True
         if key == pygame.K_TAB:
             controls = self.focusable_controls()
             if controls:
