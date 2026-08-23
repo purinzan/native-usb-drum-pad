@@ -1,10 +1,13 @@
 # Native USB Drum Pad
 
-Local desktop drum app using pygame-ce, the platform MIDI API, and the trimmed Salamander Drumkit samples.
+Local desktop drum app using pygame-ce, the platform MIDI API, and three sample
+sets: the trimmed Salamander Drumkit, a CC0 TR-808 set, and generated glass.
 
 > **Windows and macOS.** `platform_backend.py` talks to WinMM on Windows and CoreMIDI on macOS through `ctypes`, and points SDL at WASAPI or CoreAudio to match. No extra dependency either way.
 
 ![Main screen](ui-main.png)
+
+![Kit B](ui-kit-b.png)
 
 The panel is graphite and colour means state, not identity: amber marks the pad
 sounding now, the pad selected, and an armed Record. A pad carries one name, and
@@ -60,6 +63,9 @@ Controls:
 - `Device`: cycle MIDI input devices.
 - `DONNER` / `GM` / `Learn`: cycle Starrypad preset mapping mode.
 - `Kit A` through `Kit D`: save and recall independent pad sounds and sensitivities.
+  Kit A ships the acoustic Salamander kit; Kit B ships a TR-808 core with glass
+  on the cymbal and hand percussion pads. Kits C and D start as copies of A.
+  A kit you have edited is never replaced when a newer factory kit ships.
 - `Reset`: reset the current mapping mode.
 - `+` / `-`: adjust volume.
 - Click a pad to select it, then use the `Sound` arrows or `Sensitivity` controls.
@@ -143,9 +149,21 @@ Feedback the panel gives you:
 | `typeface.py` | The bundled faces. Barlow and Barlow Condensed for text and labels, IBM Plex Mono for all numbers, with a system CJK face behind them so Japanese MIDI port names render. |
 | `icons.py` | 24 icons drawn as lines and polygons on a 16x16 grid. |
 | `tools/make_assets.py` | Regenerates the grain tile and the app icons, including `starrypad.icns` and `starrypad.ico`. |
+| `tools/build_kit_b.py` | Rebuilds `samples/tr808/` from the CC0 pack and generates `samples/impact/`. |
 
 Fonts are Barlow, Barlow Condensed and IBM Plex Mono, all under the SIL Open
 Font License; the licence texts sit beside them in `assets/fonts/`.
+
+### Sounds
+
+Each pack keeps its own folder so its licence sits beside it; see
+`LICENSE-SAMPLES`. The 808 set is Michael Fischer's TR-808 Sample Set as
+published CC0 by TidalCycles, trimmed to the transient, resampled to 48 kHz in
+the frequency domain and normalized. The glass is generated rather than
+recorded — inharmonic partials, a filtered noise transient and scattered debris
+grains — because a pad needs a one-shot that starts on sample zero, and because
+generating it means three genuinely different shatters instead of one recording
+played three times.
 
 A struck pad glows, and both the brightness and how long it holds scale with
 velocity, so the panel carries dynamics you can see. The Starrypad's own lights

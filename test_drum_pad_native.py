@@ -517,16 +517,26 @@ class ProjectTests(unittest.TestCase):
 
 class KitTests(unittest.TestCase):
     def test_only_hihats_use_choke_groups(self):
+        """Closed and open hats cut each other; nothing else chokes.
+
+        Each kit chokes within itself, so an 808 open hat is not cut short by
+        an acoustic closed hat sitting on another pad.
+        """
         choked_synths = {
             synth
             for synth, layers in drum.KIT.items()
             if any(layer.get("choke") for layer in layers)
         }
-        expected = set(drum.TIMBRE_FAMILIES[1] + drum.TIMBRE_FAMILIES[2] + ("hat_semi",))
-        self.assertEqual(choked_synths, expected)
+        acoustic = set(drum.TIMBRE_FAMILIES[1] + drum.TIMBRE_FAMILIES[2] + ("hat_semi",))
+        electronic = {"hat8", "openhat8", "openhat8_long"}
+        self.assertEqual(choked_synths, acoustic | electronic)
         self.assertEqual(
-            {layer.get("choke") for synth in expected for layer in drum.KIT[synth]},
+            {layer.get("choke") for synth in acoustic for layer in drum.KIT[synth]},
             {"hat"},
+        )
+        self.assertEqual(
+            {layer.get("choke") for synth in electronic for layer in drum.KIT[synth]},
+            {"hat8"},
         )
 
     def test_requested_timbre_families_have_four_layered_choices(self):
@@ -586,7 +596,7 @@ class KitTests(unittest.TestCase):
         missing = [
             name
             for name in drum.all_sample_files()
-            if not (drum.SAMPLE_DIR / name).exists()
+            if not drum.sample_path(name).exists()
         ]
         self.assertEqual(missing, [])
 
@@ -744,6 +754,73 @@ class PadSwapTests(unittest.TestCase):
             self.assertTrue(app.handle_key(pygame.K_UP))
         self.assertEqual(app.selected_pad, self.kick + 4)
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
+
+
+class KitBTests(unittest.TestCase):
+    """Kit B ships the CC0 TR-808 core plus the generated glass."""
+
+    def test_every_kit_b_sound_exists_and_is_named(self):
+        for synth in drum.KIT_B_PAD_SYNTHS:
+            self.assertIn(synth, drum.KIT, f"{synth} has no kit entry")
+            self.assertIn(synth, drum.SYNTH_LABELS, f"{synth} has no label")
+            for layer in drum.KIT[synth]:
+                for name in layer["files"]:
+                    self.assertTrue(drum.sample_path(name).exists(), name)
+
+    def test_pack_samples_resolve_beside_their_licence(self):
+        # A bare name is Salamander; a name with a folder is its own pack.
+        self.assertEqual(drum.sample_path("kick_OH_FF_1.wav").parent, drum.SAMPLE_DIR)
+        self.assertEqual(
+            drum.sample_path("tr808/kick8.wav").parent, drum.SAMPLES_ROOT / "tr808"
+        )
+
+    def test_the_drum_machine_repeats_exactly_and_glass_does_not(self):
+        for synth in ("kick8", "snare8", "hat8", "clap8"):
+            self.assertEqual(len(drum.KIT[synth][0]["files"]), 1, synth)
+        for synth in ("glass_tap", "glass_break", "glass_shatter"):
+            self.assertEqual(len(drum.KIT[synth][0]["files"]), 3, synth)
+
+    def test_samples_start_on_the_transient(self):
+        """The point of the build step: no dead air before the hit."""
+        import wave
+
+        for name in ("tr808/kick8.wav", "tr808/hat8.wav", "impact/glass_break_1.wav"):
+            path = drum.sample_path(name)
+            with wave.open(str(path), "rb") as source:
+                self.assertEqual(source.getframerate(), 48000, name)
+                self.assertEqual(source.getsampwidth(), 3, name)
+                self.assertEqual(source.getnchannels(), 2, name)
+                raw = source.readframes(source.getnframes())
+            packed = numpy.frombuffer(raw, dtype=numpy.uint8).reshape(-1, 3)
+            values = (
+                packed[:, 0].astype(numpy.int32)
+                | (packed[:, 1].astype(numpy.int32) << 8)
+                | (packed[:, 2].astype(numpy.int32) << 16)
+            )
+            values = numpy.where(values & 0x800000, values - 0x1000000, values)
+            mono = numpy.abs(values.reshape(-1, 2)[:, 0].astype(numpy.float32))
+            onset_ms = int(numpy.argmax(mono > mono.max() * 0.02)) / 48.0
+            self.assertLess(onset_ms, 1.0, f"{name} starts {onset_ms:.2f} ms late")
+
+    def test_a_new_session_starts_with_the_shipped_kits(self):
+        app = drum.DrumPadNative(settings_path=None)
+        self.assertEqual(app.kit_slots["A"]["pad_synths"], list(drum.DEFAULT_PAD_SYNTHS))
+        self.assertEqual(app.kit_slots["B"]["pad_synths"], list(drum.KIT_B_PAD_SYNTHS))
+
+    def test_an_untouched_slot_in_an_old_project_picks_up_its_shipped_kit(self):
+        app = drum.DrumPadNative(settings_path=None)
+        payload = json.loads(json.dumps(app.project_payload()))
+        # Kits live in the project, so this is a project saved before Kit B
+        # shipped: every slot still holding the acoustic kit, bar one edit.
+        payload["kits"] = {slot: app.default_kit_profile() for slot in drum.KIT_SLOTS}
+        payload["kits"]["C"]["pad_synths"][0] = "clap"
+
+        app.apply_project_data(json.loads(json.dumps(payload)))
+
+        self.assertEqual(app.kit_slots["B"]["pad_synths"], list(drum.KIT_B_PAD_SYNTHS))
+        self.assertEqual(app.kit_slots["A"]["pad_synths"], list(drum.DEFAULT_PAD_SYNTHS))
+        # An edited slot is never overwritten by a newer factory kit.
+        self.assertEqual(app.kit_slots["C"]["pad_synths"][0], "clap")
 
 
 class AccentTests(unittest.TestCase):
