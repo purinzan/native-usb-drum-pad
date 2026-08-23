@@ -1314,6 +1314,7 @@ class DrumPadNative:
         self.pad_drag_origin = None
         self.pad_drag_active = False
         self.pad_swap_flash = {}
+        self.accent_name = theme.DEFAULT_ACCENT
         self.solo_pads = set()
         self.mixer_bypass = False
         self.mixer_open = False
@@ -1603,6 +1604,9 @@ class DrumPadNative:
             self.audio_rate = audio_mode_config(self.audio_mode)[0]
         if self.audio_buffer not in AUDIO_BUFFERS:
             self.audio_buffer = audio_mode_config(self.audio_mode)[1]
+        accent = str(data.get("accent", theme.DEFAULT_ACCENT))
+        self.accent_name = accent if accent in theme.ACCENT_NAMES else theme.DEFAULT_ACCENT
+        theme.set_accent(self.accent_name)
         try:
             saved_scale = float(data.get("ui_scale", 1.0))
             self.ui_scale = min((1.0, 1.25, 1.5), key=lambda value: abs(value - saved_scale))
@@ -1680,6 +1684,7 @@ class DrumPadNative:
             "audio_rate": self.audio_rate,
             "audio_buffer": self.audio_buffer,
             "ui_scale": self.ui_scale,
+            "accent": self.accent_name,
             "clock_source": self.clock_source,
             "clock_output_enabled": self.clock_output_enabled,
             "midi_output_name": self.midi_output_name,
@@ -3951,6 +3956,8 @@ class DrumPadNative:
                 elif name == "ui_scale":
                     scales = (1.0, 1.25, 1.5)
                     self.set_ui_scale(scales[(scales.index(self.ui_scale) + 1) % len(scales)])
+                elif name.startswith("accent_"):
+                    self.set_accent(name.removeprefix("accent_"))
                 elif name == "sync_back":
                     self.sync_setup_open = False
                 elif name.startswith("sync_source_"):
@@ -4151,6 +4158,16 @@ class DrumPadNative:
                 self.queue_pad(index, 112)
                 self.begin_pad_drag(index, pos)
                 return
+
+    def set_accent(self, name):
+        """Repoint the one colour the panel uses to mean "now"."""
+        if name not in theme.ACCENT_NAMES:
+            return False
+        self.accent_name = name
+        theme.set_accent(name)
+        self.status = f"Pad light: {name}"
+        self.persist_settings_async()
+        return True
 
     def swap_pads(self, first, second):
         """Move one pad's sound onto another and bring its music along.
@@ -7276,12 +7293,12 @@ class DrumPadNative:
         shade = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)
         shade.fill((20, 24, 26, 120))
         self.screen.blit(shade, (0, 0))
-        modal = pygame.Rect(270, 90, 500, 640)
+        modal = pygame.Rect(270, 82, 500, 692)
         pygame.draw.rect(self.screen, theme.PANEL, modal, border_radius=8)
         pygame.draw.rect(self.screen, theme.RULE, modal, width=1, border_radius=8)
         title = self.font.render("Settings", True, theme.INK)
-        self.screen.blit(title, (294, 116))
-        self.settings_buttons["settings_close"] = pygame.Rect(718, 104, 30, 30)
+        self.screen.blit(title, (294, 108))
+        self.settings_buttons["settings_close"] = pygame.Rect(718, 96, 30, 30)
         self.draw_button(self.settings_buttons["settings_close"], "", icon="close")
 
         if self.calibration_active:
@@ -7363,6 +7380,16 @@ class DrumPadNative:
         self.screen.blit(self.small_font.render("Display size", True, label_color), (294, 664))
         self.settings_buttons["ui_scale"] = pygame.Rect(646, 654, 102, 34)
         self.draw_button(self.settings_buttons["ui_scale"], f"{round(self.ui_scale * 100)}%")
+
+        self.screen.blit(self.small_font.render("Pad light", True, label_color), (294, 712))
+        self.screen.blit(self.small_font.render(self.accent_name, True, value_color), (294, 735))
+        for index, (name, color) in enumerate(theme.ACCENT_CHOICES):
+            swatch = pygame.Rect(560 + index * 32, 716, 28, 28)
+            self.settings_buttons[f"accent_{name}"] = swatch
+            pygame.draw.rect(self.screen, color, swatch, border_radius=theme.RADIUS["field"])
+            if name == self.accent_name:
+                pygame.draw.rect(self.screen, theme.INK, swatch.inflate(6, 6), width=2,
+                                 border_radius=theme.RADIUS["field"] + 2)
 
     def draw_sync_setup(self):
         label_color = theme.INK_2

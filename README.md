@@ -89,6 +89,12 @@ Controls:
 - `Browse` keeps the pads visible while filtering built-in and user sounds by type, kit, favorites, recents, or search; preview is non-destructive and missing files can be batch relinked from one folder.
 - MIDI Sync supports Auto/Internal/External clock source, 24 PPQN clock in/out, Start/Continue/Stop, output-port selection, and timing offset; external BPM is locked on the performance surface.
 - `Settings`: choose MIDI input, mapping, sample/record start behavior, calibrate the selected pad, or view diagnostics hidden during normal performance.
+- `Settings > Pad light`: pick the accent colour. Amber, Ember, Rose, Violet,
+  Cyan or Lime. It is the one colour the panel spends on "now" - the pad
+  sounding, the pad selected, an armed Record, the loop playhead and the swap
+  flash - so changing it repaints all of them together. The wash behind filled
+  regions and the ink drawn on top are derived from the choice, and the setting
+  is remembered.
 - Sampling options include an opt-in low-level input Monitor and Multi mode for recording sequentially into unused pads; clipped takes wait for Keep or Record Again before assignment.
 - `S`: start or stop sampling.
 - `Repeat`: enable note repeat while a MIDI pad remains held.

@@ -746,6 +746,45 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class AccentTests(unittest.TestCase):
+    """The accent is a module global, so every test here puts it back."""
+
+    def setUp(self):
+        import theme
+
+        self.theme = theme
+        self.addCleanup(theme.set_accent, theme.DEFAULT_ACCENT)
+        self.app = drum.DrumPadNative(settings_path=None)
+
+    def test_choosing_a_colour_repoints_accent_wash_and_ink(self):
+        self.assertTrue(self.app.set_accent("Cyan"))
+        self.assertEqual(self.app.accent_name, "Cyan")
+        self.assertEqual(self.theme.ACCENT, dict(self.theme.ACCENT_CHOICES)["Cyan"])
+        # The wash sits between the ground and the accent, never at either end.
+        self.assertNotIn(self.theme.ACCENT_SOFT, (self.theme.GROUND, self.theme.ACCENT))
+
+    def test_every_choice_keeps_its_ink_readable(self):
+        for name, color in self.theme.ACCENT_CHOICES:
+            self.theme.set_accent(name)
+            ink = self.theme.relative_luminance(self.theme.ON_ACCENT)
+            accent = self.theme.relative_luminance(color)
+            self.assertGreater(abs(accent - ink), 0.3, f"{name} ink is too close to its accent")
+
+    def test_an_unknown_colour_is_refused(self):
+        self.assertFalse(self.app.set_accent("Chartreuse"))
+        self.assertEqual(self.app.accent_name, self.theme.DEFAULT_ACCENT)
+
+    def test_the_choice_survives_a_settings_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            app = drum.DrumPadNative(settings_path=path)
+            app.set_accent("Violet")
+            app.persist_settings()
+            reopened = drum.DrumPadNative(settings_path=path)
+            self.assertEqual(reopened.accent_name, "Violet")
+            self.assertEqual(self.theme.ACCENT, dict(self.theme.ACCENT_CHOICES)["Violet"])
+
+
 class QuitShortcutTests(unittest.TestCase):
     """Esc closes panels; quitting takes the platform chord."""
 
