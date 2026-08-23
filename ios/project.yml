@@ -1,0 +1,49 @@
+name: Starrypad
+options:
+  bundleIdPrefix: com.purinzan
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  Starrypad:
+    type: application
+    platform: iOS
+    sources:
+      - path: Starrypad
+    resources:
+      - path: Starrypad/Resources
+    # Resources are staged from the desktop app's sample library rather than
+    # committed twice. Pointing `resources` straight at ../samples builds
+    # cleanly and bundles nothing, which fails only at runtime, so the copy is
+    # explicit and happens before every build.
+    preBuildScripts:
+      - name: Stage kit samples
+        script: |
+          set -e
+          staging="$SRCROOT/Starrypad/Resources"
+          mkdir -p "$staging"
+          rsync -a --delete --include="*.wav" --exclude="*" \
+            "$SRCROOT/../samples/tr808/" "$SRCROOT/../samples/impact/" "$staging/"
+        basedOnDependencyAnalysis: false
+    info:
+      path: Starrypad/Info.plist
+      properties:
+        CFBundleDisplayName: Starrypad
+        CFBundleShortVersionString: "0.1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Background audio keeps the engine alive when the screen locks, which
+        # matters for a pad you are playing from a connected controller.
+        UIBackgroundModes:
+          - audio
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.purinzan.starrypad
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGNING_ALLOWED: NO
+        GENERATE_INFOPLIST_FILE: NO
