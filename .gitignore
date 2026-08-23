@@ -15,3 +15,8 @@ user-samples/
 # OS
 Thumbs.db
 .DS_Store
+
+# iOS: the project and staged resources are generated from ios/project.yml
+ios/build/
+ios/Starrypad.xcodeproj/
+ios/Starrypad/Resources/

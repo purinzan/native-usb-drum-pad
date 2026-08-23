@@ -182,6 +182,29 @@ Feedback the panel gives you:
 - Launching a second copy prints `STARRYPAD is already running` instead of
   exiting without a word.
 
+## iOS
+
+`ios/` holds a working vertical slice: sixteen pads, the CC0 kit, CoreMIDI input
+and AVAudioEngine playback, with the velocity curve, floor expansion and colour
+rules ported from the desktop app.
+
+```sh
+cd ios && xcodegen generate
+xcodebuild -project Starrypad.xcodeproj -scheme Starrypad -sdk iphonesimulator \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
+```
+
+The project file and the staged samples are generated, so only `project.yml` and
+the Swift sources are committed. `Kit.swift` and `Theme.swift` are generated
+from `drum_pad_native.py` and `theme.py` so the two apps cannot drift.
+
+This is a rewrite rather than a port, and the reason is measurable: of 8,936
+lines, 667 are platform independent. The rest is pygame drawing and macOS
+audio and MIDI. On iOS the CoreAudio HAL does not exist, PortAudio has no
+backend, `subprocess` is forbidden so the ffmpeg import path cannot run, and
+`ctypes` cannot load system frameworks inside the sandbox. What is worth
+carrying over is the design: the decisions, the kit, and the numbers.
+
 ## Not built yet
 
 The panel is modelled on an MPC, and four things from that model are missing.
