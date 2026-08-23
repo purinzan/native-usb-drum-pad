@@ -2105,26 +2105,23 @@ class LooperTests(unittest.TestCase):
         self.assertFalse(self.app.loop_recording)
         self.assertEqual(self.app.loop_events, [(0.0, 2, 75)])
 
-    def test_quantize_uses_current_repeat_grid(self):
-        self.app.repeat_rate = "1/16"
+    def test_quantize_uses_the_quantize_grid(self):
+        self.app.quantize_grid = "1/16"
         self.app.loop_events = [(0.13, 0, 70), (0.39, 1, 80)]
         self.app.handle_loop_command("QUANTIZE")
         self.assertEqual(self.app.loop_events, [(0.25, 0, 70), (0.5, 1, 80)])
 
-    def test_natural_feel_is_non_destructive_and_reset_restores_exact_timing(self):
+    def test_quantize_keeps_the_unquantized_timing(self):
+        """Quantize edits a copy, so undo has something exact to go back to."""
         original = [(0.13, 0, 70), (0.39, 1, 80)]
         self.app.loop_events = list(original)
-        self.assertTrue(self.app.set_feel_preset("Natural", now_ns=1_000_000_000))
+        self.app.handle_loop_command("QUANTIZE", now_ns=1_000_000_000)
         self.assertEqual(self.app.loop_source_events, original)
-        self.assertAlmostEqual(self.app.loop_events[0][0], 0.19)
-        self.assertTrue(self.app.reset_loop_feel(now_ns=2_000_000_000))
-        self.assertEqual(self.app.loop_events, original)
-        self.assertIsNone(self.app.loop_source_events)
 
     def test_feel_changes_support_undo_and_redo(self):
         original = [(0.13, 0, 70)]
         self.app.loop_events = list(original)
-        self.app.set_feel_preset("Tight", now_ns=1_000_000_000)
+        self.app.handle_loop_command("QUANTIZE", now_ns=1_000_000_000)
         self.assertEqual(self.app.loop_events, [(0.25, 0, 70)])
         self.app.handle_loop_command("UNDO", now_ns=2_000_000_000)
         self.assertEqual(self.app.loop_events, original)
