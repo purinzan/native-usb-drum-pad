@@ -781,6 +781,89 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class MusicImportTests(unittest.TestCase):
+    """Dropping a song on the window and getting it onto pads."""
+
+    @staticmethod
+    def render(directory, name, seconds, rate=44100):
+        """A tone file in whatever container the extension names."""
+        import shutil
+        import subprocess
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            return None
+        target = Path(directory) / name
+        result = subprocess.run(
+            [ffmpeg, "-v", "error", "-y", "-f", "lavfi",
+             "-i", f"sine=frequency=110:duration={seconds}",
+             "-ar", str(rate), "-ac", "2", str(target)],
+            capture_output=True, timeout=120,
+        )
+        return target if result.returncode == 0 else None
+
+    def test_sdl_readable_formats_decode_without_help(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.render(directory, "tone.wav", 1)
+            if source is None:
+                self.skipTest("ffmpeg is not installed")
+            audio, rate = drum.decode_audio_file(source)
+            self.assertEqual(rate, drum.MIXER_FREQUENCY)
+            self.assertAlmostEqual(len(audio) / rate, 1.0, delta=0.05)
+
+    def test_m4a_decodes_through_ffmpeg(self):
+        """SDL cannot read m4a, which is most of a Mac's music library."""
+        import shutil
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = self.render(directory, "tone.m4a", 1)
+            if source is None:
+                self.skipTest("ffmpeg is not installed")
+            with self.assertRaises(Exception):
+                drum.pygame.mixer.Sound(str(source))
+            audio, rate = drum.decode_audio_file(source)
+            self.assertGreater(len(audio), 0)
+            self.assertEqual(audio.shape[1], 2)
+
+    def test_an_unreadable_file_reports_why(self):
+        with tempfile.TemporaryDirectory() as directory:
+            broken = Path(directory) / "not-audio.wav"
+            broken.write_bytes(b"this is not a wave file")
+            with self.assertRaises(Exception):
+                drum.decode_audio_file(broken)
+
+    def test_a_short_import_is_left_alone(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.pending_import_length = 3.0
+        self.assertFalse(app.frame_long_import(app.selected_pad))
+        self.assertEqual(app.pad_layers[app.selected_pad][0]["edit"]["end"], 1.0)
+
+    def test_a_long_import_lands_as_a_region_and_opens_chop(self):
+        app = drum.DrumPadNative(settings_path=None)
+        slot = app.selected_pad
+        app.pad_layers[slot][0]["edit"]["source_bpm"] = 120.0
+        app.pending_import_length = 180.0
+        app.detect_sample_tempo_for = lambda _slot: True
+
+        self.assertTrue(app.frame_long_import(slot))
+        edit = app.pad_layers[slot][0]["edit"]
+        # Four bars at 120 bpm is 8 seconds of a 180 second file.
+        self.assertAlmostEqual(edit["end"] * 180.0, 8.0, delta=0.1)
+        self.assertEqual(edit["start"], 0.0)
+        self.assertTrue(app.chop_open)
+        self.assertIn("Chop", app.status)
+
+    def test_the_region_is_capped_for_a_very_slow_tempo(self):
+        app = drum.DrumPadNative(settings_path=None)
+        slot = app.selected_pad
+        app.pad_layers[slot][0]["edit"]["source_bpm"] = 40.0
+        app.pending_import_length = 600.0
+        app.detect_sample_tempo_for = lambda _slot: True
+        app.frame_long_import(slot)
+        region = app.pad_layers[slot][0]["edit"]["end"] * 600.0
+        self.assertLessEqual(region, drum.IMPORT_REGION_MAX_SECONDS + 0.01)
+
+
 class VelocityFloorTests(unittest.TestCase):
     """A controller whose softest hit is 50 should still reach a ghost note."""
 

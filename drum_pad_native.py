@@ -8,6 +8,7 @@ import json
 import queue
 import struct
 import statistics
+import subprocess
 import sys
 import tempfile
 import threading
@@ -1226,6 +1227,45 @@ def audio_input_devices():
         return []
 
 
+# A song dropped on the window is minutes long. Assigning all of it to a pad is
+# technically a sample and practically useless, so a long import lands as a
+# region of this many bars, with the rest kept for moving the region through.
+IMPORT_REGION_BARS = 4
+IMPORT_REGION_MAX_SECONDS = 20.0
+LONG_IMPORT_SECONDS = 25.0
+
+
+def decode_audio_file(path, rate=MIXER_FREQUENCY):
+    """Decode any audio file, falling back to ffmpeg for what SDL cannot read.
+
+    SDL handles wav, mp3, ogg, flac and aiff. It does not handle m4a or aac,
+    which is most of what a Mac's music library is in, so ffmpeg fills the gap
+    when it is installed. That also picks up opus, wma and the audio track of a
+    video file, at no extra cost.
+    """
+    import numpy
+
+    try:
+        sound = pygame.mixer.Sound(str(path))
+        return pygame.sndarray.array(sound).astype(numpy.float32) / 32768.0, rate
+    except Exception:
+        pass
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError(f"{Path(path).suffix or 'this format'} needs ffmpeg to decode")
+    result = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(path), "-f", "f32le",
+         "-ac", "2", "-ar", str(int(rate)), "-"],
+        capture_output=True, timeout=180,
+    )
+    if result.returncode or not result.stdout:
+        detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        raise RuntimeError(detail[-1] if detail else "ffmpeg could not decode this file")
+    audio = numpy.frombuffer(result.stdout, dtype="<f4").reshape(-1, 2)
+    return numpy.array(audio, dtype=numpy.float32), rate
+
+
 def prepare_sample_audio(samples, source_rate, target_rate=MIXER_FREQUENCY):
     import numpy
 
@@ -1591,6 +1631,7 @@ class DrumPadNative:
         self.chop_mode = "Transient"
         self.chop_count = 8
         self.chop_markers = []
+        self.pending_import_length = None
         self.chop_keep_original = True
         self.chop_play_through = False
         self.chop_choke = False
@@ -3277,21 +3318,66 @@ class DrumPadNative:
         if self.sample_processing or self.sampler.snapshot()[0]:
             return
         try:
-            sound = pygame.mixer.Sound(str(path))
-            samples = pygame.sndarray.array(sound).astype("float32") / 32768.0
-            target_pad = self.selected_pad
-            self.sample_processing = True
-            self.sample_status = "Processing"
-            self.sample_worker = threading.Thread(
-                target=self.process_sample_audio,
-                args=(samples, MIXER_FREQUENCY, target_pad),
-                name="DrumSampleImport",
-                daemon=True,
-            )
-            self.sample_worker.start()
+            samples, rate = decode_audio_file(path)
         except Exception as exc:
-            self.sample_status = "Import failed"
+            self.sample_status = f"Import failed: {exc}"
             self.log(f"Sample import failed: {exc}")
+            return
+
+        seconds = len(samples) / max(1, rate)
+        self.pending_import_length = seconds
+        target_pad = self.selected_pad
+        self.sample_processing = True
+        self.sample_status = f"Processing {Path(path).name[:24]} ({seconds:.0f}s)"
+        self.sample_worker = threading.Thread(
+            target=self.process_sample_audio,
+            args=(samples, rate, target_pad),
+            name="DrumSampleImport",
+            daemon=True,
+        )
+        self.sample_worker.start()
+
+    def frame_long_import(self, slot):
+        """Point a long import at a region rather than at all of it.
+
+        The whole file stays on the pad, so the region can be moved through it
+        later; only the part that sounds is narrowed.
+        """
+        length = self.pending_import_length
+        self.pending_import_length = None
+        if not length or length <= LONG_IMPORT_SECONDS:
+            return False
+        self.detect_sample_tempo_for(slot)
+        edit = self.pad_layers[slot][0]["edit"]
+        bpm = edit.get("source_bpm") or self.bpm
+        region = min(IMPORT_REGION_MAX_SECONDS, IMPORT_REGION_BARS * 4 * 60.0 / max(40, bpm))
+        edit["start"] = 0.0
+        edit["end"] = max(0.02, min(1.0, region / length))
+        self.edited_sound_cache.clear()
+        self.chop_open = True
+        self.chop_markers = []
+        self.status = (
+            f"{length:.0f}s imported - first {region:.1f}s selected, "
+            "Edit moves the region and Chop spreads it across the pads"
+        )
+        return True
+
+    def detect_sample_tempo_for(self, slot):
+        layer = self.pad_layers[slot][0]
+        sound = self.custom_sound_cache.get(layer["file"]) if layer["file"] else None
+        if sound is None:
+            return False
+        try:
+            samples = pygame.sndarray.array(sound)
+        except (pygame.error, ValueError):
+            return False
+        detected = detect_sample_tempo(samples)
+        if not detected:
+            return False
+        bpm, bars, _confidence = detected
+        layer["edit"]["source_bpm"] = bpm
+        layer["edit"]["source_bars"] = bars if bars in (1, 2, 4, 8, 16) else None
+        return True
 
     def poll_sample_results(self):
         while True:
@@ -3326,6 +3412,7 @@ class DrumPadNative:
         self.edited_sound_cache.clear()
         self.waveform_cache.pop(filename, None)
         self.sample_status = "Sample ready"
+        self.frame_long_import(target_pad)
         self.persist_settings()
         self.log(f"Sample assigned to pad {target_pad + 1}")
         if not self.sample_continuous_active:
