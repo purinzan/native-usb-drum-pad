@@ -1,22 +1,31 @@
 # Native USB Drum Pad
 
-Local Windows desktop drum app using pygame-ce, the Windows WinMM MIDI API, and the trimmed Salamander Drumkit samples.
+Local desktop drum app using pygame-ce, the platform MIDI API, and the trimmed Salamander Drumkit samples.
 
-> **Windows only.** The app talks to the WinMM MIDI API and WASAPI directly through `ctypes`, so it does not run on macOS or Linux as-is.
+> **Windows and macOS.** `platform_backend.py` talks to WinMM on Windows and CoreMIDI on macOS through `ctypes`, and points SDL at WASAPI or CoreAudio to match. No extra dependency either way.
 
 ![Main screen](ui-main.png)
 
 ## Requirements
 
-- Windows 10 or later
-- Python 3.11 or later
+- Windows 10 or later, or macOS 12 or later (Apple Silicon and Intel)
+- Python 3.12 or later (numpy 2.5 does not build for 3.11)
 - A class-compliant USB MIDI drum pad (developed against the Donner Starrypad)
 
 ## Setup
 
+Windows:
+
 ```bat
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
+```
+
+macOS:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 ```
 
 
@@ -26,6 +35,12 @@ Run:
 
 ```bat
 Start Native Drum Pad.bat
+```
+
+On macOS, double-click `start-native-drum-pad.command` in Finder or run:
+
+```sh
+./start-native-drum-pad.command
 ```
 
 Controls:

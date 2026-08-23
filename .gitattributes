@@ -2,3 +2,5 @@
 *.wav binary
 *.png binary
 *.mid binary
+*.command text eol=lf
+*.bat text eol=crlf

@@ -1,5 +1,7 @@
 import json
 import queue
+import struct
+import sys
 import tempfile
 import time
 import unittest
@@ -619,41 +621,24 @@ class MappingTests(unittest.TestCase):
 
 
 class MidiCallbackTests(unittest.TestCase):
+    """Decoding is shared by every backend, so this runs on Windows and macOS."""
+
     def setUp(self):
-        self.input = drum.WinMidiInput.__new__(drum.WinMidiInput)
+        self.input = drum.MidiInput.__new__(drum.MidiInput)
         self.input.event_queue = queue.SimpleQueue()
 
-    @staticmethod
-    def message(status, data1, data2=0):
-        return status | (data1 << 8) | (data2 << 16)
+    def emit(self, status, data1, data2=0):
+        self.input._emit(status, data1, data2, time.perf_counter_ns())
 
     def test_note_on_is_timestamped(self):
-        self.input._callback(
-            None,
-            drum.MIM_DATA,
-            None,
-            self.message(0x99, 20, 47),
-            None,
-        )
+        self.emit(0x99, 20, 47)
         event = self.input.event_queue.get_nowait()
         self.assertEqual(event[:4], ("MIDI", "N", 20, 47))
         self.assertGreater(event[4], 0)
 
     def test_note_off_is_reported_and_zero_cc_does_not_retrigger(self):
-        self.input._callback(
-            None,
-            drum.MIM_DATA,
-            None,
-            self.message(0x99, 20, 0),
-            None,
-        )
-        self.input._callback(
-            None,
-            drum.MIM_DATA,
-            None,
-            self.message(0xB9, 20, 0),
-            None,
-        )
+        self.emit(0x99, 20, 0)
+        self.emit(0xB9, 20, 0)
         event = self.input.event_queue.get_nowait()
         self.assertEqual(event[:4], ("MIDI_OFF", "N", 20, 0))
         with self.assertRaises(queue.Empty):
@@ -661,10 +646,111 @@ class MidiCallbackTests(unittest.TestCase):
 
     def test_realtime_clock_and_transport_are_forwarded(self):
         for status in (0xF8, 0xFA, 0xFB, 0xFC):
-            self.input._callback(None, drum.MIM_DATA, None, status, None)
+            self.emit(status, 0, 0)
             event = self.input.event_queue.get_nowait()
             self.assertEqual(event[:2], ("MIDI_CLOCK", status))
             self.assertGreater(event[2], 0)
+
+
+@unittest.skipUnless(sys.platform == "darwin", "CoreMIDI backend is macOS only")
+class CoreMidiPacketTests(unittest.TestCase):
+    """Push real packet lists through CoreMIDI into the macOS input backend.
+
+    A virtual source is the only way to cover packet walking, running status,
+    and the 4-byte MIDIPacketNext rounding that Apple Silicon requires.
+    """
+
+    def setUp(self):
+        import ctypes
+        import platform_backend
+
+        self.ctypes = ctypes
+        self.backend = platform_backend
+        coremidi = platform_backend.coremidi
+        coremidi.MIDISourceCreate.argtypes = [
+            ctypes.c_uint32, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)
+        ]
+        coremidi.MIDISourceCreate.restype = ctypes.c_int32
+        coremidi.MIDIReceived.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+        coremidi.MIDIReceived.restype = ctypes.c_int32
+        coremidi.MIDIEndpointDispose.argtypes = [ctypes.c_uint32]
+
+        name = platform_backend._cfstring("DrumPadPacketTest")
+        self.source = ctypes.c_uint32()
+        try:
+            status = coremidi.MIDISourceCreate(
+                platform_backend._shared_client(), name, ctypes.byref(self.source)
+            )
+        finally:
+            platform_backend.corefoundation.CFRelease(name)
+        self.assertEqual(status, 0, "MIDISourceCreate failed")
+
+        index = self.wait_for(
+            lambda: next(
+                (i for i, n in platform_backend.MidiInput.devices() if n == "DrumPadPacketTest"),
+                None,
+            )
+        )
+        self.assertIsNotNone(index, "virtual source never appeared")
+        self.queue = queue.SimpleQueue()
+        self.input = platform_backend.MidiInput(index, self.queue)
+        self.addCleanup(coremidi.MIDIEndpointDispose, self.source)
+        self.addCleanup(self.input.close)
+
+    @staticmethod
+    def wait_for(probe, timeout=3.0):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = probe()
+            if result is not None:
+                return result
+            time.sleep(0.02)
+        return None
+
+    def send(self, *payloads):
+        blob = struct.pack("<I", len(payloads))
+        for payload in payloads:
+            blob += struct.pack("<QH", 0, len(payload)) + payload
+            blob += b"\x00" * (-len(blob) % 4)
+        buffer = self.ctypes.create_string_buffer(blob, len(blob))
+        self.assertEqual(self.backend.coremidi.MIDIReceived(self.source, buffer), 0)
+
+    def drain(self, count):
+        events = []
+        deadline = time.monotonic() + 3.0
+        while len(events) < count and time.monotonic() < deadline:
+            try:
+                events.append(self.queue.get(timeout=0.05)[:-1])
+            except queue.Empty:
+                continue
+        return events
+
+    def test_packet_list_decodes_every_message_shape(self):
+        self.send(bytes([0x99, 38, 100]))
+        self.send(bytes([0x99, 38, 0]))
+        self.send(bytes([0x89, 38, 64]))
+        self.send(bytes([0xB9, 20, 90]), bytes([0xF8]))          # two packets in one list
+        self.send(bytes([0xC9, 5]))
+        self.send(bytes([0x99, 40, 70, 42, 80]))                 # running status
+        self.send(bytes([0xF0, 0x7E, 0x01, 0xF7, 0x99, 44, 55]))  # sysex is skipped
+        self.send(bytes([0xFA]), bytes([0xFC]))
+
+        self.assertEqual(
+            self.drain(11),
+            [
+                ("MIDI", "N", 38, 100),
+                ("MIDI_OFF", "N", 38, 0),
+                ("MIDI_OFF", "N", 38, 64),
+                ("MIDI", "CC", 20, 90),
+                ("MIDI_CLOCK", 0xF8),
+                ("MIDI", "PC", 5, 127),
+                ("MIDI", "N", 40, 70),
+                ("MIDI", "N", 42, 80),
+                ("MIDI", "N", 44, 55),
+                ("MIDI_CLOCK", 0xFA),
+                ("MIDI_CLOCK", 0xFC),
+            ],
+        )
 
 
 class MidiSyncTests(unittest.TestCase):
@@ -726,7 +812,7 @@ class MidiConnectionTests(unittest.TestCase):
     def test_first_connection_suggests_calibration_only_once(self):
         app = drum.DrumPadNative(settings_path=None)
         fake = mock.Mock()
-        with mock.patch.object(drum, "WinMidiInput") as midi_class:
+        with mock.patch.object(drum, "MidiInput") as midi_class:
             midi_class.return_value = fake
             midi_class.devices.return_value = [(0, "STARRYPAD MINI")]
             self.assertTrue(app.open_midi(0))
