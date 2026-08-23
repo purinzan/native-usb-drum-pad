@@ -209,6 +209,65 @@ def pitch_shift_array(samples, semitones):
     return numpy.ascontiguousarray(numpy.clip(shifted, -32768, 32767).astype(values.dtype))
 
 
+MAX_PAD_LAYERS = 4
+
+
+def default_pad_layer():
+    return {"file": None, "edit": default_sample_edit(), "low": 1, "high": 127}
+
+
+def split_layer_ranges(count):
+    """Even velocity bands for `count` layers, covering 1 to 127 with no gap."""
+    count = max(1, min(MAX_PAD_LAYERS, int(count)))
+    edges = [1] + [round(1 + (127 - 1) * (step + 1) / count) for step in range(count)]
+    return [(edges[step], edges[step + 1] - (1 if step + 1 < count else 0)) for step in range(count)]
+
+
+def layer_for_velocity(layers, velocity):
+    """The layer a hit lands in. Out of range velocities take the nearest band."""
+    playable = [layer for layer in layers if layer["file"]]
+    if not playable:
+        return None
+    for layer in playable:
+        if layer["low"] <= velocity <= layer["high"]:
+            return layer
+    return playable[-1] if velocity > playable[-1]["high"] else playable[0]
+
+
+class LayerField:
+    """`custom_sample_files[slot]` and `sample_edits[slot]` are layer one.
+
+    Thirty call sites already treated a pad as holding one sample. Rather than
+    rewrite them all, these two names became views onto the first layer, which
+    is what they always meant.
+    """
+
+    def __init__(self, owner, key):
+        self._owner = owner
+        self._key = key
+
+    def __getitem__(self, slot):
+        if isinstance(slot, slice):
+            return [layers[0][self._key] for layers in self._owner.pad_layers[slot]]
+        return self._owner.pad_layers[slot][0][self._key]
+
+    def __setitem__(self, slot, value):
+        if isinstance(slot, slice):
+            for layers, item in zip(self._owner.pad_layers[slot], value):
+                layers[0][self._key] = item
+            return
+        self._owner.pad_layers[slot][0][self._key] = value
+
+    def __len__(self):
+        return len(self._owner.pad_layers)
+
+    def __iter__(self):
+        return (layers[0][self._key] for layers in self._owner.pad_layers)
+
+    def __eq__(self, other):
+        return list(self) == list(other)
+
+
 def default_sample_edit():
     return {
         "start": 0.0, "end": 1.0, "normalize": False, "reverse": False,
@@ -216,6 +275,28 @@ def default_sample_edit():
         "choke_group": None,
         "source_bpm": None, "source_bars": None, "stretch_mode": "Off",
     }
+
+
+def sanitize_pad_layers(value):
+    if not isinstance(value, list) or not value:
+        return [default_pad_layer()]
+    layers = []
+    for entry in value[:MAX_PAD_LAYERS]:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("file")
+        safe = (
+            name
+            if isinstance(name, str) and Path(name).name == name and Path(name).suffix.lower() == ".wav"
+            else None
+        )
+        try:
+            low = max(1, min(127, int(entry.get("low", 1))))
+            high = max(low, min(127, int(entry.get("high", 127))))
+        except (TypeError, ValueError):
+            low, high = 1, 127
+        layers.append({"file": safe, "edit": sanitize_sample_edit(entry.get("edit")), "low": low, "high": high})
+    return layers or [default_pad_layer()]
 
 
 def sanitize_sample_edit(value):
@@ -1466,8 +1547,10 @@ class DrumPadNative:
         self.calibration_duplicate_ms = []
         self.calibration_last_raw_ns = None
         self.calibration_prompted = False
-        self.custom_sample_files = [None] * PAD_SLOTS
-        self.sample_edits = [default_sample_edit() for _ in range(PAD_SLOTS)]
+        self.pad_layers = [[default_pad_layer()] for _ in range(PAD_SLOTS)]
+        self.pad_layer_index = [0] * PAD_SLOTS
+        self.custom_sample_files = LayerField(self, "file")
+        self.sample_edits = LayerField(self, "edit")
         self.custom_sound_cache = {}
         self.edited_sound_cache = {}
         self.sample_channels = {}
@@ -1606,6 +1689,7 @@ class DrumPadNative:
             "pad_sensitivity": [1.0] * PAD_COUNT,
             "custom_samples": [None] * PAD_SLOTS,
             "sample_edits": [default_sample_edit() for _ in range(PAD_SLOTS)],
+            "pad_layers": None,
             "pad_volume": [1.0] * PAD_SLOTS,
             "pad_pan": [0.0] * PAD_SLOTS,
             "pad_tune": [0] * PAD_SLOTS,
@@ -1656,6 +1740,12 @@ class DrumPadNative:
             else None
             for value in custom_samples
         ]
+        pad_layers = profile.get("pad_layers")
+        if isinstance(pad_layers, list) and len(pad_layers) == PAD_SLOTS:
+            pad_layers = [sanitize_pad_layers(value) for value in pad_layers]
+        else:
+            pad_layers = None
+
         sample_edits = profile.get("sample_edits", fallback["sample_edits"])
         if not isinstance(sample_edits, list) or len(sample_edits) != PAD_SLOTS:
             sample_edits = fallback["sample_edits"]
@@ -1684,6 +1774,7 @@ class DrumPadNative:
             "pad_sensitivity": list(sensitivity),
             "custom_samples": list(custom_samples),
             "sample_edits": sample_edits,
+            "pad_layers": pad_layers,
             "pad_volume": pad_volume,
             "pad_pan": pad_pan,
             "pad_tune": pad_tune,
@@ -2279,8 +2370,11 @@ class DrumPadNative:
         self.kit_slots[self.active_kit] = {
             "pad_synths": list(self.pad_synths),
             "pad_sensitivity": list(self.pad_sensitivity),
+            # custom_samples and sample_edits stay in the payload so a build
+            # without layers can still read the first sample of each pad.
             "custom_samples": list(self.custom_sample_files),
-            "sample_edits": json.loads(json.dumps(self.sample_edits)),
+            "sample_edits": json.loads(json.dumps(list(self.sample_edits))),
+            "pad_layers": json.loads(json.dumps(self.pad_layers)),
             "pad_volume": list(self.pad_volume),
             "pad_pan": list(self.pad_pan),
             "pad_tune": list(self.pad_tune),
@@ -2293,8 +2387,7 @@ class DrumPadNative:
         sanitized = self.sanitize_kit_profile(profile)
         self.pad_synths = sanitized["pad_synths"]
         self.pad_sensitivity = sanitized["pad_sensitivity"]
-        self.custom_sample_files = sanitized["custom_samples"]
-        self.sample_edits = sanitized["sample_edits"]
+        self.load_pad_layers(sanitized)
         self.edited_sound_cache.clear()
         self.waveform_cache.clear()
         self.pad_volume = sanitized["pad_volume"]
@@ -3301,12 +3394,17 @@ class DrumPadNative:
         self.persist_settings_async()
         return True
 
-    def edited_custom_sound(self, index, bypass=False):
-        filename = self.custom_sample_files[index]
+    def edited_custom_sound(self, index, bypass=False, velocity=None):
+        layer = self.pad_layers[index][0]
+        if velocity is not None and len(self.pad_layers[index]) > 1:
+            landed = layer_for_velocity(self.pad_layers[index], velocity)
+            if landed is not None:
+                layer = landed
+        filename = layer["file"]
         source = self.custom_sound_cache.get(filename) if filename else None
         if source is None or bypass:
             return source
-        edit = self.sample_edits[index]
+        edit = layer["edit"]
         key = (filename, json.dumps(edit, sort_keys=True), self.bpm)
         cached = self.edited_sound_cache.get(key)
         if cached is not None:
@@ -4294,6 +4392,12 @@ class DrumPadNative:
                     self.tap_tempo()
                 elif name.startswith("tab_"):
                     self.select_tab(name.removeprefix("tab_"))
+                elif name.startswith("layer_") and name.removeprefix("layer_").isdigit():
+                    self.select_layer(int(name.removeprefix("layer_")))
+                elif name == "layer_add":
+                    self.add_pad_layer()
+                elif name == "layer_remove":
+                    self.remove_pad_layer()
                 elif name.startswith("bank_") and name.removeprefix("bank_").isdigit():
                     self.select_bank(int(name.removeprefix("bank_")))
                 elif name.startswith("kit_") and name.removeprefix("kit_") in KIT_SLOTS:
@@ -4456,6 +4560,69 @@ class DrumPadNative:
             self.status = f"Value: {self.value_spec(name)[0]}"
             return True
         return False
+
+    def load_pad_layers(self, profile):
+        """Take layers from a profile, falling back to its one sample per pad."""
+        layers = profile.get("pad_layers")
+        if isinstance(layers, list) and len(layers) == PAD_SLOTS:
+            self.pad_layers = [sanitize_pad_layers(value) for value in layers]
+        else:
+            self.pad_layers = [
+                [{
+                    "file": profile["custom_samples"][slot],
+                    "edit": profile["sample_edits"][slot],
+                    "low": 1, "high": 127,
+                }]
+                for slot in range(PAD_SLOTS)
+            ]
+        self.pad_layer_index = [0] * PAD_SLOTS
+
+    def layer_count(self, slot=None):
+        slot = self.selected_pad if slot is None else slot
+        return len(self.pad_layers[slot])
+
+    def active_layer(self, slot=None):
+        slot = self.selected_pad if slot is None else slot
+        layers = self.pad_layers[slot]
+        return layers[min(self.pad_layer_index[slot], len(layers) - 1)]
+
+    def select_layer(self, number, slot=None):
+        slot = self.selected_pad if slot is None else slot
+        if not 0 <= number < len(self.pad_layers[slot]):
+            return False
+        self.pad_layer_index[slot] = number
+        return True
+
+    def add_pad_layer(self, slot=None):
+        """Add a layer and redivide the velocity range evenly across them."""
+        slot = self.selected_pad if slot is None else slot
+        if len(self.pad_layers[slot]) >= MAX_PAD_LAYERS:
+            self.status = f"A pad holds at most {MAX_PAD_LAYERS} layers"
+            return False
+        self.push_project_history()
+        self.pad_layers[slot].append(default_pad_layer())
+        self.rebalance_layers(slot)
+        self.pad_layer_index[slot] = len(self.pad_layers[slot]) - 1
+        self.status = f"Layer {len(self.pad_layers[slot])} added"
+        self.persist_settings_async()
+        return True
+
+    def remove_pad_layer(self, slot=None):
+        slot = self.selected_pad if slot is None else slot
+        if len(self.pad_layers[slot]) <= 1:
+            self.pad_layers[slot][0] = default_pad_layer()
+            self.status = "Layer cleared"
+            return False
+        self.push_project_history()
+        del self.pad_layers[slot][self.pad_layer_index[slot]]
+        self.rebalance_layers(slot)
+        self.pad_layer_index[slot] = min(self.pad_layer_index[slot], len(self.pad_layers[slot]) - 1)
+        self.persist_settings_async()
+        return True
+
+    def rebalance_layers(self, slot):
+        for layer, (low, high) in zip(self.pad_layers[slot], split_layer_ranges(len(self.pad_layers[slot]))):
+            layer["low"], layer["high"] = low, high
 
     def slot(self, pad):
         """Absolute sound slot for a physical pad in the current bank."""
@@ -5796,7 +5963,7 @@ class DrumPadNative:
             "events": list(self.loop_events), "bars": self.loop_bars, "bpm": self.bpm,
             "pad_synths": list(self.pad_synths), "pad_sensitivity": list(self.pad_sensitivity),
             "custom_samples": list(self.custom_sample_files),
-            "sample_edits": json.loads(json.dumps(self.sample_edits)), "volume": self.volume,
+            "sample_edits": json.loads(json.dumps(list(self.sample_edits))), "volume": self.volume,
             "event_meta": json.loads(json.dumps(self.loop_event_meta)), "pad_volume": list(self.pad_volume),
             "pad_pan": list(self.pad_pan), "pad_tune": list(self.pad_tune), "pad_mute": list(self.pad_mute),
             "pad_punch": list(self.pad_punch), "pad_air": list(self.pad_air),
@@ -6395,10 +6562,19 @@ class DrumPadNative:
             return
 
         synth = self.pad_synths[index]
-        custom_file = self.custom_sample_files[index]
+        # A hit lands in whichever layer covers its velocity.
+        layer = layer_for_velocity(self.pad_layers[index], velocity) or self.pad_layers[index][0]
+        custom_file = layer["file"]
         custom_source = self.custom_sound_cache.get(custom_file) if custom_file else None
-        custom_sound = self.edited_custom_sound(index, self.sample_edit_bypass) if custom_source else None
-        if not custom_sound and index == PAD_NAME_TO_INDEX["Closed Hat"] and str(midi_note).startswith("N42"):
+        custom_sound = (
+            self.edited_custom_sound(index, self.sample_edit_bypass, velocity)
+            if custom_source else None
+        )
+        if (
+            not custom_sound
+            and self.pad_of(index) == PAD_NAME_TO_INDEX["Closed Hat"]
+            and str(midi_note).startswith("N42")
+        ):
             if self.hat_openness >= 0.67:
                 synth = HAT_OPEN_PAIRS.get(synth, "open_hat")
             elif self.hat_openness >= 0.25:
@@ -7307,7 +7483,7 @@ class DrumPadNative:
             pygame.draw.line(self.screen, theme.RULE_SOFT, (x, strip.y + 14), (x, strip.bottom - 14))
 
         self.draw_loop_cell(pygame.Rect(cells[0] + 16, strip.y + 16, strip.width // 5 - 32, 108))
-        self.draw_pad_info_cell(pygame.Rect(cells[1] + 16, strip.y + 16, strip.width // 5 - 32, 108))
+        self.draw_layer_cell(pygame.Rect(cells[1] + 16, strip.y + 16, strip.width // 5 - 32, 108))
         self.draw_swing_cell(pygame.Rect(cells[2] + 16, strip.y + 16, strip.width // 5 - 32, 108))
         self.draw_metronome_cell(pygame.Rect(cells[3] + 16, strip.y + 16, strip.width // 5 - 32, 108))
         self.draw_output_cell(pygame.Rect(cells[4] + 16, strip.y + 16, strip.width // 5 - 32, 108))
@@ -7391,6 +7567,72 @@ class DrumPadNative:
         )
         self.buttons["kit_browse"] = pygame.Rect(rect.x, rect.bottom - 32, rect.width, 30)
         self.draw_button(self.buttons["kit_browse"], "Browse", icon="folder")
+
+    def draw_layer_cell(self, rect):
+        """The selected pad's layers, its velocity split, and the waveform.
+
+        A pad holds up to four samples split by velocity. The strip under the
+        buttons is the split; the wave is whichever layer is selected, so the
+        thing being edited is the thing being shown.
+        """
+        slot = self.selected_pad
+        layers = self.pad_layers[slot]
+        active = min(self.pad_layer_index[slot], len(layers) - 1)
+        self.cell_caption(rect, "Layers")
+
+        count = self.data_font_sm.render(f"{len(layers)}/{MAX_PAD_LAYERS}", True, theme.INK_3)
+        self.screen.blit(count, (rect.right - count.get_width(), rect.y + 2))
+
+        width, gap = 26, 4
+        for number, layer in enumerate(layers):
+            button = pygame.Rect(rect.x + number * (width + gap), rect.y + 20, width, 26)
+            self.buttons[f"layer_{number}"] = button
+            self.draw_button(button, str(number + 1), active=number == active,
+                             enabled=bool(layer["file"]) or number == active)
+        self.buttons["layer_add"] = pygame.Rect(rect.x + 4 * (width + gap), rect.y + 20, 26, 26)
+        self.buttons["layer_remove"] = pygame.Rect(rect.x + 4 * (width + gap) + 30, rect.y + 20, 26, 26)
+        self.draw_button(self.buttons["layer_add"], "+", enabled=len(layers) < MAX_PAD_LAYERS)
+        self.draw_button(self.buttons["layer_remove"], "-", enabled=bool(layers[active]["file"]) or len(layers) > 1)
+
+        split = pygame.Rect(rect.x, rect.y + 52, rect.width, 5)
+        pygame.draw.rect(self.screen, theme.RULE, split, border_radius=2)
+        for number, layer in enumerate(layers):
+            band = pygame.Rect(
+                split.x + round(split.width * (layer["low"] - 1) / 126.0), split.y,
+                max(2, round(split.width * (layer["high"] - layer["low"]) / 126.0)), split.height,
+            )
+            colour = theme.ACCENT if number == active else theme.SIGNAL if layer["file"] else theme.RULE_SOFT
+            pygame.draw.rect(self.screen, colour, band, border_radius=2)
+
+        self.draw_waveform(pygame.Rect(rect.x, rect.y + 64, rect.width, 44), layers[active])
+
+    def draw_waveform(self, rect, layer):
+        """Peaks for one layer, with its trim shaded out and the loudest bar lit."""
+        pygame.draw.rect(self.screen, theme.GROUND, rect, border_radius=3)
+        pygame.draw.rect(self.screen, theme.RULE, rect, width=1, border_radius=3)
+        filename = layer["file"]
+        peaks = self.sample_waveform_peaks(filename, bins=rect.width - 4) if filename else []
+        if not peaks:
+            hint = self.small_font.render(
+                "No sample on this layer" if filename is None else "Loading",
+                True, theme.INK_3,
+            )
+            self.screen.blit(hint, hint.get_rect(center=rect.center))
+            return
+
+        edit = layer["edit"]
+        start = max(0.0, min(1.0, float(edit.get("start", 0.0))))
+        end = max(start, min(1.0, float(edit.get("end", 1.0))))
+        centre = rect.centery
+        for column, value in enumerate(peaks):
+            x = rect.x + 2 + column
+            inside = start <= (column / max(1, len(peaks) - 1)) <= end
+            height = max(1, round(value * (rect.height - 6) / 2))
+            colour = theme.ACCENT if inside else theme.RULE
+            pygame.draw.line(self.screen, colour, (x, centre - height), (x, centre + height))
+        for edge in (start, end):
+            x = rect.x + 2 + round(edge * (len(peaks) - 1))
+            pygame.draw.line(self.screen, theme.SIGNAL, (x, rect.top + 2), (x, rect.bottom - 2))
 
     def draw_pad_info_cell(self, rect):
         index = self.selected_pad

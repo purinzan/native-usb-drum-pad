@@ -167,7 +167,6 @@ They are listed because knowing what is absent is worth more than discovering it
 | --- | --- |
 | Multiple tracks | The app plays one part. Tracks need their own routing, mute and solo, and a mixer that knows about them. |
 | GRID note editor | Step Seq covers rhythm on a grid; a piano-roll style editor with note length and drag is a screen that does not exist yet. |
-| Per-pad sample layers | Velocity layers are defined in the kit rather than being editable per pad. |
 
 The MIDI tab currently opens the existing Settings panel, and the Sampler tab
 opens the sample editor or the browser, rather than being screens of their own.

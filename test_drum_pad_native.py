@@ -781,6 +781,88 @@ class PadSwapTests(unittest.TestCase):
         self.assertEqual(app.pad_synths[self.kick + 4], "kick")
 
 
+class PadLayerTests(unittest.TestCase):
+    """Up to four samples per pad, split by velocity."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+        self.slot = self.app.selected_pad
+
+    def test_a_pad_starts_with_one_layer_covering_everything(self):
+        app = self.app
+        self.assertEqual(app.layer_count(), 1)
+        layer = app.pad_layers[self.slot][0]
+        self.assertEqual((layer["low"], layer["high"]), (1, 127))
+
+    def test_adding_layers_redivides_the_velocity_range(self):
+        app = self.app
+        app.add_pad_layer()
+        app.add_pad_layer()
+        bands = [(layer["low"], layer["high"]) for layer in app.pad_layers[self.slot]]
+        self.assertEqual(bands, [(1, 42), (43, 84), (85, 127)])
+        # No gaps and no overlap across the whole range.
+        self.assertEqual(bands[0][0], 1)
+        self.assertEqual(bands[-1][1], 127)
+        for lower, upper in zip(bands, bands[1:]):
+            self.assertEqual(upper[0], lower[1] + 1)
+
+    def test_a_pad_holds_at_most_four(self):
+        app = self.app
+        for _ in range(6):
+            app.add_pad_layer()
+        self.assertEqual(app.layer_count(), drum.MAX_PAD_LAYERS)
+        self.assertIn("at most", app.status)
+
+    def test_a_hit_lands_in_the_layer_covering_its_velocity(self):
+        app = self.app
+        app.add_pad_layer()
+        app.add_pad_layer()
+        for index, layer in enumerate(app.pad_layers[self.slot]):
+            layer["file"] = f"layer{index}.wav"
+        for velocity, expected in ((5, "layer0.wav"), (60, "layer1.wav"), (127, "layer2.wav")):
+            self.assertEqual(
+                drum.layer_for_velocity(app.pad_layers[self.slot], velocity)["file"], expected
+            )
+
+    def test_empty_layers_are_skipped_rather_than_silent(self):
+        app = self.app
+        app.add_pad_layer()
+        app.pad_layers[self.slot][1]["file"] = "loud.wav"
+        # Nothing on the quiet layer, so a soft hit still finds the loud one.
+        self.assertEqual(drum.layer_for_velocity(app.pad_layers[self.slot], 10)["file"], "loud.wav")
+        self.assertIsNone(drum.layer_for_velocity([drum.default_pad_layer()], 64))
+
+    def test_the_old_names_still_read_and_write_layer_one(self):
+        app = self.app
+        app.custom_sample_files[self.slot] = "take.wav"
+        self.assertEqual(app.pad_layers[self.slot][0]["file"], "take.wav")
+        app.pad_layers[self.slot][0]["file"] = "other.wav"
+        self.assertEqual(app.custom_sample_files[self.slot], "other.wav")
+        # Slices too: the chop and continuous sampling paths use them.
+        app.custom_sample_files[0:2] = ["a.wav", "b.wav"]
+        self.assertEqual(app.custom_sample_files[0:2], ["a.wav", "b.wav"])
+
+    def test_layers_survive_a_kit_round_trip(self):
+        app = self.app
+        app.add_pad_layer()
+        app.pad_layers[self.slot][1]["file"] = "second.wav"
+        app.save_current_kit()
+        profile = app.sanitize_kit_profile(app.kit_slots[app.active_kit])
+        app.pad_layers = [[drum.default_pad_layer()] for _ in range(drum.PAD_SLOTS)]
+        app.load_pad_layers(profile)
+        self.assertEqual(app.layer_count(self.slot), 2)
+        self.assertEqual(app.pad_layers[self.slot][1]["file"], "second.wav")
+
+    def test_a_kit_saved_before_layers_becomes_one_layer_per_pad(self):
+        app = self.app
+        legacy = app.default_kit_profile()
+        legacy.pop("pad_layers")
+        legacy["custom_samples"][2] = "old.wav"
+        app.load_pad_layers(legacy)
+        self.assertEqual(app.layer_count(2), 1)
+        self.assertEqual(app.pad_layers[2][0]["file"], "old.wav")
+
+
 class PadBankTests(unittest.TestCase):
     """Sixteen pads, four banks of sounds behind them."""
 
