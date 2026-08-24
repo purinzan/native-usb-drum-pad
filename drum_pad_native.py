@@ -73,10 +73,6 @@ NOTE_REPEAT_RATES = ("1/4", "1/8", "1/16", "1/16T", "1/32")
 
 # What the VALUE control edits. Each entry reads and writes one parameter, so
 # the knob, the plus and minus buttons and the wheel all drive the same path.
-VALUE_TARGETS = (
-    "bpm", "swing", "volume", "metronome", "sensitivity", "pad_level",
-    "velocity_floor",
-)
 PAD_MOVE_DELTAS = {
     pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: 4, pygame.K_DOWN: -4,
 }
@@ -1597,7 +1593,6 @@ class DrumPadNative:
         self.metronome_level = 70
         self.velocity_floor = 1
         self.velocity_observed_min = None
-        self.value_target = "bpm"
         self.value_drag_from = None
         self.main_tab = "Main"
         self.output_peak = [0.0, 0.0]
@@ -4742,12 +4737,14 @@ class DrumPadNative:
                     self.start_loop_bounce()
                 elif name == "pad_solo":
                     self.toggle_pad_solo()
-                elif name == "bpm_field":
-                    self.select_value_target("bpm")
-                elif name == "value_swing":
-                    self.select_value_target("swing")
-                elif name == "value_metronome":
-                    self.select_value_target("metronome")
+                elif name == "swing_down":
+                    self.nudge_swing(-1)
+                elif name == "swing_up":
+                    self.nudge_swing(1)
+                elif name == "metro_down":
+                    self.adjust_metronome_level(-5)
+                elif name == "metro_up":
+                    self.adjust_metronome_level(5)
                 elif name == "value_down":
                     self.nudge_value(-1)
                 elif name == "value_up":
@@ -4819,64 +4816,12 @@ class DrumPadNative:
         self.persist_settings_async()
         return True
 
-    def value_spec(self, name=None):
-        """Label, current value, display text and step for one VALUE target."""
-        name = name or self.value_target
-        index = self.selected_pad
-        if name == "swing":
-            return "Swing", self.feel_swing, f"{self.feel_swing}%", 1
-        if name == "volume":
-            return "Volume", round(self.volume * 100), f"{round(self.volume * 100)}%", 1
-        if name == "metronome":
-            return "Metro level", self.metronome_level, f"{self.metronome_level}", 1
-        if name == "sensitivity":
-            percent = round((self.pad_sensitivity[self.pad_of(index)] - 0.6) * 100)
-            return "Sensitivity", percent, f"{percent}", 1
-        if name == "pad_level":
-            percent = round(self.pad_volume[index] * 100)
-            return "Pad level", percent, f"{percent}%", 1
-        if name == "velocity_floor":
-            return "Velocity floor", self.velocity_floor, f"{self.velocity_floor}", 1
-        return "Tempo", self.bpm, f"{self.bpm}.00", 1
-
     def nudge_value(self, steps):
-        """Move the selected VALUE target by whole steps, from any input."""
+        """Move the master volume by whole percent, from knob, wheel or keys."""
         if not steps:
             return
-        name = self.value_target
-        index = self.selected_pad
-        if name == "bpm":
-            if self.clock_active_source == "External":
-                self.status = "Tempo follows the external clock"
-                return
-            self.adjust_bpm(steps)
-        elif name == "swing":
-            # adjust_feel reapplies the loop from its source timing, so swing
-            # stays non destructive however many times it is turned.
-            if not self.adjust_feel("swing", steps):
-                self.feel_swing = max(50, min(75, self.feel_swing + steps))
-                self.persist_settings_async()
-        elif name == "volume":
-            self.volume = max(0.0, min(1.0, self.volume + steps * 0.01))
-            self.persist_settings_async()
-        elif name == "metronome":
-            self.metronome_level = max(0, min(100, self.metronome_level + steps))
-            self.persist_settings_async()
-        elif name == "sensitivity":
-            self.adjust_pad_sensitivity(steps * 0.01)
-        elif name == "pad_level":
-            self.push_project_history()
-            self.pad_volume[index] = max(0.0, min(1.5, self.pad_volume[index] + steps * 0.01))
-            self.persist_settings_async()
-        elif name == "velocity_floor":
-            self.set_velocity_floor(self.velocity_floor + steps)
-
-    def select_value_target(self, name):
-        if name in VALUE_TARGETS:
-            self.value_target = name
-            self.status = f"Value: {self.value_spec(name)[0]}"
-            return True
-        return False
+        self.volume = max(0.0, min(1.0, self.volume + steps * 0.01))
+        self.persist_settings_async()
 
     def load_pad_layers(self, profile):
         """Take layers from a profile, falling back to its one sample per pad."""
@@ -7182,11 +7127,15 @@ class DrumPadNative:
         mark = self.label_font.render("Starrypad", True, theme.ACCENT)
         self.screen.blit(mark, (20, 36 - mark.get_height() // 2))
 
-        self.draw_field("project", pygame.Rect(120, 12, 156, 48), "Project", self.project_name[:18])
-        self.draw_field("bpm_field", pygame.Rect(284, 12, 96, 48), "BPM", f"{self.bpm}.00",
-                        active=self.value_target == "bpm")
+        self.draw_field("project", pygame.Rect(120, 12, 128, 48), "Project", self.project_name[:14])
+        self.draw_field(None, pygame.Rect(256, 12, 96, 48), "BPM", f"{self.bpm}.00")
+        external = self.clock_active_source == "External"
+        self.buttons["bpm_up"] = pygame.Rect(356, 13, 24, 22)
+        self.buttons["bpm_down"] = pygame.Rect(356, 37, 24, 22)
+        self.draw_button(self.buttons["bpm_up"], "+", enabled=not external)
+        self.draw_button(self.buttons["bpm_down"], "-", enabled=not external)
         self.buttons["tap"] = pygame.Rect(386, 24, 52, 26)
-        self.draw_button(self.buttons["tap"], "Tap", enabled=self.clock_active_source != "External")
+        self.draw_button(self.buttons["tap"], "Tap", enabled=not external)
 
         loop = self.loop_snapshot()
         beat = loop["phase"]
@@ -7914,12 +7863,27 @@ class DrumPadNative:
             x = rect.x + 2 + round(edge * (len(peaks) - 1))
             pygame.draw.line(self.screen, theme.SIGNAL, (x, rect.top + 2), (x, rect.bottom - 2))
 
+    def nudge_swing(self, steps):
+        """adjust_feel reapplies the loop from its source timing, so swing
+        stays non destructive however many times it is turned."""
+        if not self.adjust_feel("swing", steps):
+            self.feel_swing = max(50, min(75, self.feel_swing + steps))
+            self.persist_settings_async()
+        return True
+
+    def adjust_metronome_level(self, steps):
+        self.metronome_level = max(0, min(100, self.metronome_level + steps))
+        self.persist_settings_async()
+        return True
+
     def draw_swing_cell(self, rect):
         y = self.cell_caption(rect, "Swing")
-        self.buttons["value_swing"] = rect
-        active = self.value_target == "swing"
-        value = self.data_font_lg.render(f"{self.feel_swing}%", True, theme.ACCENT if active else theme.INK)
+        value = self.data_font_lg.render(f"{self.feel_swing}%", True, theme.INK)
         self.screen.blit(value, (rect.x, y))
+        self.buttons["swing_down"] = pygame.Rect(rect.right - 74, y + 2, 34, 30)
+        self.buttons["swing_up"] = pygame.Rect(rect.right - 36, y + 2, 34, 30)
+        self.draw_button(self.buttons["swing_down"], "-")
+        self.draw_button(self.buttons["swing_up"], "+")
         bar = pygame.Rect(rect.x, y + 46, rect.width, 4)
         pygame.draw.rect(self.screen, theme.RULE, bar, border_radius=2)
         filled = round(bar.width * (self.feel_swing - 50) / 25.0)
@@ -7937,11 +7901,13 @@ class DrumPadNative:
             self.buttons["metro"], "On" if self.metronome_enabled else "Off",
             danger=self.metronome_enabled, icon="metronome",
         )
-        self.buttons["value_metronome"] = pygame.Rect(rect.x, y + 40, rect.width, 40)
-        active = self.value_target == "metronome"
         self.screen.blit(self.label_font.render("Level", True, theme.INK_3), (rect.x, y + 44))
-        level = self.data_font.render(str(self.metronome_level), True, theme.ACCENT if active else theme.INK)
+        level = self.data_font.render(str(self.metronome_level), True, theme.INK)
         self.screen.blit(level, (rect.x + 54, y + 42))
+        self.buttons["metro_down"] = pygame.Rect(rect.right - 74, y + 38, 34, 28)
+        self.buttons["metro_up"] = pygame.Rect(rect.right - 36, y + 38, 34, 28)
+        self.draw_button(self.buttons["metro_down"], "-")
+        self.draw_button(self.buttons["metro_up"], "+")
         bar = pygame.Rect(rect.x, y + 68, rect.width, 4)
         pygame.draw.rect(self.screen, theme.RULE, bar, border_radius=2)
         filled = round(bar.width * self.metronome_level / 100.0)
@@ -7999,8 +7965,7 @@ class DrumPadNative:
     def draw_value_panel(self, rect):
         pygame.draw.rect(self.screen, theme.PANEL, rect, border_radius=theme.RADIUS["panel"])
         pygame.draw.rect(self.screen, theme.RULE, rect, width=1, border_radius=theme.RADIUS["panel"])
-        label, _value, text, _step = self.value_spec()
-        caption = self.label_font.render(f"Value \u00b7 {label}", True, theme.INK_3)
+        caption = self.label_font.render("Master", True, theme.INK_3)
         self.screen.blit(caption, (rect.centerx - caption.get_width() // 2, rect.y + 10))
 
         centre = (rect.centerx, rect.y + 104)
@@ -8019,7 +7984,10 @@ class DrumPadNative:
         pygame.draw.line(self.screen, theme.ACCENT, centre, tip, 3)
         pygame.draw.circle(self.screen, theme.ACCENT, tip, 4)
 
-        readout = self.data_font_lg.render(text, True, theme.INK)
+        peaking = time.perf_counter() < self.master_peak_warning_until
+        readout = self.data_font_lg.render(
+            f"{round(self.volume * 100)}%", True, theme.DANGER if peaking else theme.INK,
+        )
         self.screen.blit(readout, (rect.centerx - readout.get_width() // 2, rect.y + 168))
         self.buttons["value_down"] = pygame.Rect(rect.x + 18, rect.bottom - 46, 84, 34)
         self.buttons["value_up"] = pygame.Rect(rect.right - 102, rect.bottom - 46, 84, 34)
@@ -8027,13 +7995,7 @@ class DrumPadNative:
         self.draw_button(self.buttons["value_up"], "+")
 
     def value_fraction(self):
-        ranges = {
-            "bpm": (BPM_MIN, BPM_MAX), "swing": (50, 75), "volume": (0, 100),
-            "metronome": (0, 100), "sensitivity": (0, 100), "pad_level": (0, 150),
-        }
-        low, high = ranges.get(self.value_target, (0, 100))
-        value = self.value_spec()[1]
-        return max(0.0, min(1.0, (value - low) / max(1, high - low)))
+        return max(0.0, min(1.0, self.volume))
 
     def draw_transport(self, rect):
         pygame.draw.rect(self.screen, theme.PANEL, rect, border_radius=theme.RADIUS["panel"])

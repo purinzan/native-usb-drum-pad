@@ -1354,21 +1354,36 @@ class MainScreenTests(unittest.TestCase):
         app.handle_midi_release("N", 36)
         self.assertNotIn(("N", 36), app.held_triggers)
 
-    def test_the_value_control_drives_every_target(self):
+    def test_the_knob_is_the_master_volume(self):
         app = self.app
-        for target in drum.VALUE_TARGETS:
-            self.assertTrue(app.select_value_target(target))
-            before = app.value_spec()[1]
-            app.nudge_value(2)
-            self.assertNotEqual(app.value_spec()[1], before, target)
-        self.assertFalse(app.select_value_target("nonsense"))
+        app.volume = 0.5
+        app.nudge_value(2)
+        self.assertAlmostEqual(app.volume, 0.52)
+        app.nudge_value(-4)
+        self.assertAlmostEqual(app.volume, 0.48)
 
     def test_the_knob_pointer_stays_inside_its_sweep(self):
         app = self.app
-        for target in drum.VALUE_TARGETS:
-            app.value_target = target
-            self.assertGreaterEqual(app.value_fraction(), 0.0)
-            self.assertLessEqual(app.value_fraction(), 1.0)
+        for volume in (0.0, 0.37, 1.0):
+            app.volume = volume
+            self.assertAlmostEqual(app.value_fraction(), volume)
+        # The knob cannot be driven past either end of its travel.
+        app.volume = 1.0
+        app.nudge_value(50)
+        self.assertEqual(app.volume, 1.0)
+        app.volume = 0.0
+        app.nudge_value(-50)
+        self.assertEqual(app.volume, 0.0)
+
+    def test_swing_and_metronome_keep_their_own_controls(self):
+        """Both used to be editable only by pointing the knob at them."""
+        app = self.app
+        app.feel_swing = 50
+        app.nudge_swing(3)
+        self.assertEqual(app.feel_swing, 53)
+        app.metronome_level = 70
+        app.adjust_metronome_level(-5)
+        self.assertEqual(app.metronome_level, 65)
 
     def test_selecting_a_kit_slot_lands_on_it(self):
         app = self.app
