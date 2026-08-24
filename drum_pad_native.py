@@ -2182,13 +2182,17 @@ class DrumPadNative:
         )
         feel_preset = str(data.get("feel_preset", "Natural"))
         self.feel_preset = feel_preset if feel_preset in (*FEEL_PRESETS, "Custom") else "Natural"
+        # "Custom" is a legal preset name and has no entry in FEEL_PRESETS, so
+        # the fallback values have to come from one that does. Python evaluates
+        # a default argument whether or not the key is missing, which made
+        # every restore of a hand-adjusted feel raise rather than only some.
+        preset = FEEL_PRESETS.get(self.feel_preset, FEEL_PRESETS["Natural"])
         try:
-            self.feel_strength = max(0, min(100, int(data.get("feel_strength", FEEL_PRESETS[self.feel_preset]["strength"]))))
-            self.feel_swing = max(50, min(75, int(data.get("feel_swing", FEEL_PRESETS[self.feel_preset]["swing"]))))
+            self.feel_strength = max(0, min(100, int(data.get("feel_strength", preset["strength"]))))
+            self.feel_swing = max(50, min(75, int(data.get("feel_swing", preset["swing"]))))
             self.feel_nudge_ms = max(-50, min(50, int(data.get("feel_nudge_ms", 0))))
             self.feel_humanize_ms = max(0, min(20, int(data.get("feel_humanize_ms", 0))))
         except (TypeError, ValueError):
-            preset = FEEL_PRESETS[self.feel_preset]
             self.feel_strength = preset["strength"]
             self.feel_swing = preset["swing"]
             self.feel_nudge_ms = preset["nudge_ms"]
@@ -2764,7 +2768,7 @@ class DrumPadNative:
                 velocity = max(1, min(127, int(event[2])))
             except (TypeError, ValueError):
                 continue
-            if 0 <= pad_index < len(PADS):
+            if 0 <= pad_index < PAD_SLOTS:
                 sanitized.append((beat, pad_index, velocity))
         return sorted(sanitized)
 
@@ -4468,7 +4472,8 @@ class DrumPadNative:
         if key in (pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN) and self.view_mode == "Perform":
             # Pad 0 is bottom left, so a higher index is higher on screen.
             delta = {pygame.K_LEFT: -1, pygame.K_RIGHT: 1, pygame.K_UP: 4, pygame.K_DOWN: -4}[key]
-            self.selected_pad = (self.selected_pad + delta) % len(PADS)
+            base = self.selected_pad - self.pad_of(self.selected_pad)
+            self.selected_pad = base + (self.pad_of(self.selected_pad) + delta) % PAD_COUNT
             self.pad_selection = {self.selected_pad}
             return True
         if key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.keyboard_focus_name:
@@ -4826,11 +4831,7 @@ class DrumPadNative:
 
         for name, rect in self.buttons.items():
             if rect.collidepoint(pos):
-                if name == "view_perform":
-                    self.view_mode = "Perform"
-                elif name == "view_sequence":
-                    self.view_mode = "Sequence"
-                elif name == "sequence_play":
+                if name == "sequence_play":
                     self.request_loop_command("PLAY")
                 elif name == "sequence_undo":
                     self.request_loop_command("UNDO")
@@ -4888,31 +4889,14 @@ class DrumPadNative:
                     self.cycle_mapping_mode()
                 elif name == "device":
                     self.next_midi_device()
-                elif name == "kit":
-                    self.switch_kit()
                 elif name == "settings":
                     self.settings_open = True
                 elif name == "reconnect":
                     self.force_reconnect()
-                elif name == "mixer":
-                    self.mixer_open = True
                 elif name == "project":
                     self.project_menu_open = True
-                elif name == "sound_prev":
-                    self.cycle_pad_sound(-1)
-                elif name == "sound_next":
-                    self.cycle_pad_sound(1)
-                elif name == "sens_down":
-                    self.adjust_pad_sensitivity(-0.05)
-                elif name == "sens_up":
-                    self.adjust_pad_sensitivity(0.05)
                 elif name == "sample":
                     self.toggle_sampling()
-                elif name == "sample_clear":
-                    self.clear_custom_sample()
-                elif name == "sample_edit":
-                    if self.custom_sample_files[self.selected_pad]:
-                        self.sample_editor_open = True
                 elif name == "browser":
                     self.browser_open = True
                     self.browser_selected = None
@@ -5152,6 +5136,7 @@ class DrumPadNative:
         if name not in MAIN_TABS:
             return False
         self.main_tab = name
+        self.view_mode = "Sequence" if name == "Step Seq" else "Perform"
         # Screens that are still overlays open on top of Main until they move.
         self.mixer_open = name == "Mixer"
         if name == "Sampler":
@@ -5214,7 +5199,10 @@ class DrumPadNative:
         thing back.
         """
         first, second = int(first), int(second)
-        if first == second or not (0 <= first < len(PADS) and 0 <= second < len(PADS)):
+        # Slots, not pads: everything this moves is a 64 long per slot list, so
+        # guarding against len(PADS) made rearranging silently do nothing on
+        # every bank but A.
+        if first == second or not (0 <= first < PAD_SLOTS and 0 <= second < PAD_SLOTS):
             return False
 
         self.push_project_history()
@@ -5251,7 +5239,10 @@ class DrumPadNative:
         # Either pad may still be sounding its old voice. The derived sound
         # caches key on content rather than pad index, so nothing else to clear.
         self.audio_events.put(("PANIC",))
-        self.status = f"Swapped {PADS[first]['name']} and {PADS[second]['name']}  \u00b7  Undo with U"
+        self.status = (
+            f"Swapped {pad_profile(first)['name']} and {pad_profile(second)['name']}"
+            "  \u00b7  Undo with U"
+        )
         self.persist_settings_async()
         return True
 
@@ -6455,6 +6446,10 @@ class DrumPadNative:
             "project": self.project_payload(), "project_name": self.project_name,
         }
 
+    def perform_fx_active(self):
+        """Whether anything is dialled in, so the button can say so."""
+        return not self.perform_fx_bypass and any(self.perform_fx.values())
+
     def adjust_perform_fx(self, field, amount):
         if field not in self.perform_fx:
             return False
@@ -7292,7 +7287,6 @@ class DrumPadNative:
             "project": "Projects: new, open, save as", "browser": "Browse sounds",
             "mixer": "Pad mixer", "perform_fx": "Perform FX", "share": "Share and export",
             "sample_edit": "Edit the sample", "sample_clear": "Back to the kit sound",
-            "view_perform": "Play the pads", "view_sequence": "Step sequencer",
             "reconnect": "Reconnect MIDI and audio",
         }
         labels["kit"] = f"Sound kit, not pattern  (K)  \u00b7  now {KIT_NAMES.get(self.active_kit, self.active_kit)}"
@@ -7690,7 +7684,7 @@ class DrumPadNative:
         pygame.draw.rect(self.screen, theme.PANEL, modal, border_radius=8)
         pygame.draw.rect(self.screen, theme.RULE, modal, width=1, border_radius=8)
         targets = self.mixer_targets()
-        heading = PADS[targets[0]]["name"] if len(targets) == 1 else f"{len(targets)} Pads"
+        heading = pad_profile(targets[0])["name"] if len(targets) == 1 else f"{len(targets)} Pads"
         self.screen.blit(self.big_font.render("Mixer", True, theme.INK), (294, 154))
         self.screen.blit(self.font.render(heading, True, theme.INK), (294, 210))
         self.mixer_buttons["mixer_close"] = pygame.Rect(718, 134, 30, 30)
@@ -7996,7 +7990,8 @@ class DrumPadNative:
             x = track.x + round(track.width * beat / total_beats)
             height = 4 + round((velocity / 127.0) * 8)
             pygame.draw.rect(
-                self.screen, theme.hue_hint(synth_color(self.pad_synths[pad_index], PADS[pad_index]["color"])),
+                self.screen,
+                theme.hue_hint(synth_color(self.pad_synths[pad_index], pad_profile(pad_index)["color"])),
                 pygame.Rect(x - 1, track.centery - height // 2, 2, height),
             )
         if loop["playing"] or loop["recording"]:
@@ -8189,8 +8184,10 @@ class DrumPadNative:
         self.draw_button(self.buttons["pad_mute"], "Mute", danger=self.pad_mute[index])
         self.draw_button(self.buttons["pad_solo"], "Solo", active=index in self.solo_pads)
 
-        self.buttons["browser"] = pygame.Rect(x0, 546, width, 34)
-        self.draw_button(self.buttons["browser"], "Browse", icon="folder")
+        self.buttons["browser"] = pygame.Rect(x0, 546, 74, 34)
+        self.buttons["perform_fx"] = pygame.Rect(x0 + 80, 546, 44, 34)
+        self.draw_button(self.buttons["browser"], "Browse")
+        self.draw_button(self.buttons["perform_fx"], "FX", active=self.perform_fx_active())
 
     def draw_right_rail(self):
         """The VALUE control and the transport."""
@@ -8607,8 +8604,10 @@ class DrumPadNative:
         self.screen.blit(midi_label, (294, 164))
         midi_value = self.small_font.render(self.midi_device_name[:34], True, value_color)
         self.screen.blit(midi_value, (294, 187))
-        self.settings_buttons["device"] = pygame.Rect(646, 168, 102, 34)
+        self.settings_buttons["device"] = pygame.Rect(566, 168, 84, 34)
+        self.settings_buttons["reconnect"] = pygame.Rect(656, 168, 92, 34)
         self.draw_button(self.settings_buttons["device"], "Next")
+        self.draw_button(self.settings_buttons["reconnect"], "Reconnect")
 
         mapping_label = self.small_font.render("Mapping", True, label_color)
         self.screen.blit(mapping_label, (294, 226))
@@ -8814,8 +8813,12 @@ class DrumPadNative:
         label_color = theme.INK_2
         value_color = theme.INK
         labels = ("Soft", "Natural", "Hard")
-        pad_name = PADS[self.calibration_pad]["name"]
-        heading = self.big_font.render(f"Pad {self.calibration_pad + 1}: {pad_name}", True, value_color)
+        if self.calibration_pad is None:
+            self.calibration_active = False
+            return
+        pad_name = pad_profile(self.calibration_pad)["name"]
+        label = f"{PAD_BANKS[self.bank_of(self.calibration_pad)]}{self.pad_of(self.calibration_pad) + 1}"
+        heading = self.big_font.render(f"Pad {label}: {pad_name}", True, value_color)
         self.screen.blit(heading, (294, 176))
         instruction = self.font.render(f"Play 3 {labels[self.calibration_stage].lower()} hits", True, value_color)
         self.screen.blit(instruction, (294, 226))

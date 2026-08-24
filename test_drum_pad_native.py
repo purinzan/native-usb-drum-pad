@@ -1496,6 +1496,55 @@ class MainScreenTests(unittest.TestCase):
         self.assertFalse(app.loop_playing)
 
 
+class SlotIndexingTests(unittest.TestCase):
+    """PADS holds the 16 physical pads; slots run 0-63 across four banks."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+
+    def test_pad_profile_survives_every_slot(self):
+        for slot in range(drum.PAD_SLOTS):
+            self.assertIn("name", drum.pad_profile(slot))
+            self.assertIn("color", drum.pad_profile(slot))
+
+    def test_a_swap_on_a_late_bank_names_both_pads(self):
+        app = self.app
+        app.select_bank(3)
+        first = app.selected_pad
+        self.assertGreaterEqual(first, 48)
+        app.pad_selection = {first}
+        self.assertTrue(app.swap_pads(first, first + 1))
+        self.assertIn("Swapped", app.status)
+
+    def test_a_hit_on_a_late_bank_survives_a_reload(self):
+        """Recorded hits carry a slot, and sanitising ran against 16."""
+        app = self.app
+        events = [(0.0, 40, 100), (1.0, 3, 90), (2.0, drum.PAD_SLOTS - 1, 80)]
+        self.assertEqual(app.sanitize_loop_events(events, 1), sorted(events))
+
+    def test_the_arrows_stay_inside_the_bank_on_screen(self):
+        app = self.app
+        app.select_bank(1)
+        with mock.patch.object(drum.pygame.key, "get_mods", return_value=0):
+            app.selected_pad = 16
+            app.handle_key(drum.pygame.K_RIGHT)
+            self.assertEqual(app.selected_pad, 17)
+            app.selected_pad = 16
+            app.handle_key(drum.pygame.K_LEFT)      # wraps within the bank, not out of it
+            self.assertEqual(app.selected_pad, 31)
+
+    def test_feel_marked_custom_survives_a_round_trip(self):
+        """"Custom" is a legal preset with no entry in FEEL_PRESETS."""
+        app = self.app
+        app.feel_preset = "Custom"
+        app.push_project_history()
+        app.feel_swing = 60
+        app.push_project_history()
+        app.undo_project_edit()
+        app.redo_project_edit()
+        self.assertEqual(app.feel_preset, "Custom")
+
+
 class KitBTests(unittest.TestCase):
     """Kit B ships the CC0 TR-808 core plus the generated glass."""
 
