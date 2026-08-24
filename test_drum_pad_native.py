@@ -2637,6 +2637,30 @@ class SamplingTests(unittest.TestCase):
         self.assertTrue(all(candidate["source"] == "User"
                             for candidate in app.sample_browser_candidates()))
 
+    def test_a_sample_still_on_a_pad_is_never_called_unused(self):
+        """Sampling replaces the pad but keeps the file, so the sweep has to
+        judge by what can reach a file, not by what was overwritten."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[0] = "keep-me.wav"
+        self.assertIn("keep-me.wav", app.referenced_user_samples())
+
+    def test_a_sample_only_in_undo_history_is_still_referenced(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[0] = "older-take.wav"
+        app.push_project_history()
+        app.custom_sample_files[0] = "newer-take.wav"
+        referenced = app.referenced_user_samples()
+        # Undo has to be able to put the older one back.
+        self.assertIn("older-take.wav", referenced)
+        self.assertIn("newer-take.wav", referenced)
+
+    def test_snapshot_scan_finds_names_at_any_depth(self):
+        found = drum.DrumPadNative.snapshot_sample_names(
+            {"kits": {"A": {"pad_layers": [[{"file": "deep.wav"}]]}},
+             "favorites": ["file:starred.wav"], "bpm": 120}
+        )
+        self.assertEqual(found, {"deep.wav", "starred.wav"})
+
     def test_browser_preview_is_non_destructive_and_assignment_undoes(self):
         app = drum.DrumPadNative(settings_path=None)
         app.selected_pad = 1

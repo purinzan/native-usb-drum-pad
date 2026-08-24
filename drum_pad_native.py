@@ -3479,6 +3479,107 @@ class DrumPadNative:
             self.start_sampling()
         return True
 
+    def referenced_user_samples(self):
+        """Every recording something can still reach.
+
+        Sampling onto a pad that already has one replaces the pad but not the
+        file, on purpose: undo has to be able to put the old take back, and a
+        saved project names its samples by filename. So the question is never
+        "was this pad overwritten" but "can anything still reach this file".
+        """
+        referenced = set()
+
+        def walk_layers(layers):
+            for layer in layers or []:
+                if isinstance(layer, dict) and layer.get("file"):
+                    referenced.add(layer["file"])
+
+        for layers in self.pad_layers:
+            walk_layers(layers)
+        for profile in self.kit_slots.values():
+            walk_layers_of = profile.get("pad_layers")
+            for layers in walk_layers_of or []:
+                walk_layers(layers)
+            referenced.update(name for name in profile.get("custom_samples", []) or [] if name)
+
+        # Undo history holds whole kit snapshots, so a file one step back is
+        # still live until the history rolls off.
+        for snapshot in list(self.project_history) + list(self.project_redo):
+            for value in self.snapshot_sample_names(snapshot):
+                referenced.add(value)
+
+        referenced.update(
+            value.removeprefix("file:")
+            for value in set(self.sample_favorites) | set(self.recent_samples)
+            if isinstance(value, str) and value.startswith("file:")
+        )
+
+        # A saved project on disk names its samples too, and opening it later
+        # has to still find them.
+        if PROJECT_DIR.exists():
+            for path in PROJECT_DIR.glob(f"*{PROJECT_EXTENSION}"):
+                try:
+                    data = json.loads(path.read_text())
+                except (OSError, ValueError):
+                    # Unreadable means unknown, and unknown means keep.
+                    return None
+                for value in self.snapshot_sample_names(data):
+                    referenced.add(value)
+        return referenced
+
+    @staticmethod
+    def snapshot_sample_names(data):
+        """Filenames anywhere inside a project or history snapshot."""
+        found = set()
+        stack = [data]
+        while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+                stack.extend(item.values())
+            elif isinstance(item, list):
+                stack.extend(item)
+            elif isinstance(item, str) and item.endswith(".wav"):
+                found.add(item.removeprefix("file:"))
+        return found
+
+    def unused_user_samples(self):
+        """Recordings on disk that nothing points at, newest kept regardless."""
+        if not USER_SAMPLE_DIR.exists():
+            return []
+        referenced = self.referenced_user_samples()
+        if referenced is None:
+            return []
+        return sorted(
+            (path for path in USER_SAMPLE_DIR.glob("*.wav") if path.name not in referenced),
+            key=lambda path: path.stat().st_mtime,
+        )
+
+    def discard_unused_samples(self):
+        """Delete the takes nothing can reach, and say how much came back."""
+        unused = self.unused_user_samples()
+        if not unused:
+            self.status = "No unused takes to remove"
+            return False
+        freed = 0
+        removed = 0
+        for path in unused:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+            except OSError:
+                continue
+            freed += size
+            removed += 1
+        gone = {path.name for path in unused}
+        for name in gone:
+            self.custom_sound_cache.pop(name, None)
+            self.waveform_cache = {
+                key: value for key, value in self.waveform_cache.items() if key[0] != name
+            }
+        self.status = f"Removed {removed} unused take{'s' if removed != 1 else ''} - {freed / 1_048_576:.0f} MB"
+        self.log(self.status)
+        return True
+
     def clear_custom_sample(self):
         if self.custom_sample_files[self.selected_pad]:
             self.push_project_history()
@@ -4631,6 +4732,8 @@ class DrumPadNative:
                     self.project_menu_open = False
                 elif name == "project_collect":
                     self.collect_project_samples()
+                elif name == "project_tidy":
+                    self.discard_unused_samples()
                 elif name == "project_undo":
                     self.undo_project_edit()
                 elif name == "project_redo":
@@ -7315,15 +7418,34 @@ class DrumPadNative:
             self.project_buttons[name] = pygame.Rect(x, 232, 100, 38)
             self.draw_button(self.project_buttons[name], label)
 
-        self.project_buttons["project_undo"] = pygame.Rect(294, 286, 100, 36)
-        self.project_buttons["project_redo"] = pygame.Rect(404, 286, 100, 36)
+        # Every take ever recorded is still on disk. This says how much of it
+        # nothing can reach any more, and offers to let it go.
+        unused = self.unused_user_samples()
+        megabytes = sum(path.stat().st_size for path in unused) / 1_048_576
+        self.project_buttons["project_tidy"] = pygame.Rect(294, 286, 210, 36)
+        self.draw_button(
+            self.project_buttons["project_tidy"],
+            f"Remove {len(unused)} unused takes" if unused else "No unused takes",
+            enabled=bool(unused),
+        )
+        self.screen.blit(
+            self.small_font.render(
+                f"{megabytes:.0f} MB nothing points at" if unused
+                else "Every recording on disk is still in use",
+                True, theme.INK_3,
+            ),
+            (514, 296),
+        )
+
+        self.project_buttons["project_undo"] = pygame.Rect(294, 330, 100, 36)
+        self.project_buttons["project_redo"] = pygame.Rect(404, 330, 100, 36)
         self.draw_button(self.project_buttons["project_undo"], "Undo", enabled=bool(self.project_history))
         self.draw_button(self.project_buttons["project_redo"], "Redo", enabled=bool(self.project_redo))
 
-        self.screen.blit(self.small_font.render("Recent", True, theme.INK_2), (294, 346))
+        self.screen.blit(self.small_font.render("Recent", True, theme.INK_2), (294, 386))
         for index, value in enumerate(self.recent_projects[:5]):
             path = Path(value)
-            y = 374 + index * 52
+            y = 410 + index * 48
             self.project_buttons[f"recent_{index}"] = pygame.Rect(294, y, 430, 40)
             self.draw_button(self.project_buttons[f"recent_{index}"], path.name.removesuffix(PROJECT_EXTENSION)[:38])
 
