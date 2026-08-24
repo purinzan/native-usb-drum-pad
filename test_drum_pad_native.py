@@ -1024,7 +1024,98 @@ class MusicImportTests(unittest.TestCase):
         self.assertFalse(app.frame_long_import(app.selected_pad))
         self.assertEqual(app.pad_layers[app.selected_pad][0]["edit"]["end"], 1.0)
 
-    def test_a_long_import_lands_as_a_region_and_opens_chop(self):
+    def test_dragging_the_waveform_picks_one_region(self):
+        """The ordinary case: sweep out a region, it plays on this pad."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.begin_crop_drag(0.25)
+        app.update_crop_drag(0.75)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.25)
+        self.assertAlmostEqual(edit["end"], 0.75)
+
+    def test_dragging_backwards_still_gives_a_forward_region(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.begin_crop_drag(0.8)
+        app.update_crop_drag(0.3)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.3)
+        self.assertAlmostEqual(edit["end"], 0.8)
+
+    def test_an_edge_near_the_pointer_is_grabbed_instead_of_starting_over(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.2, 0.6)
+        app.begin_crop_drag(0.61)          # within the grab radius of the end
+        app.update_crop_drag(0.9)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.2)
+        self.assertAlmostEqual(edit["end"], 0.9)
+
+    def test_a_region_never_collapses_to_nothing(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.5, 0.5)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertGreaterEqual(edit["end"] - edit["start"], drum.MIN_CROP_SPAN - 1e-9)
+
+    def test_zoom_still_allows_the_region_to_grow(self):
+        """Zoom used to switch the drag off, which made it a trap.
+
+        The window is the region plus a margin, so dragging up close can widen
+        the region as well as narrow it.
+        """
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.40, 0.55)
+        app.sample_wave_zoom = True
+        low, high = app.crop_view_window()
+        self.assertLess(low, 0.40)
+        self.assertGreater(high, 0.55)
+
+        app.begin_crop_drag(0.42)
+        app.update_crop_drag(high)
+        self.assertGreater(app.sample_edits[app.selected_pad]["end"], 0.55)
+
+    def test_the_zoom_window_holds_still_while_dragging(self):
+        """A window derived from the region would move as the region moved."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.40, 0.55)
+        app.sample_wave_zoom = True
+
+        app.begin_crop_drag(0.45)
+        frozen = app.crop_view_window()
+        app.update_crop_drag(0.50)
+        self.assertEqual(app.crop_view_window(), frozen)
+        app.finish_crop_drag()
+        self.assertNotEqual(app.crop_view_window(), frozen)
+
+    def test_one_pair_of_nudges_moves_the_edge_last_touched(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.30, 0.70)
+
+        app.begin_crop_drag(0.30)          # grabs the start
+        app.finish_crop_drag()
+        self.assertEqual(app.crop_focus_edge, "start")
+        app.adjust_sample_edit(app.crop_focus_edge, 0.05)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.35)
+        self.assertAlmostEqual(edit["end"], 0.70)
+
+    def test_the_tempo_readout_walks_the_octave_and_returns(self):
+        """Detection lands an octave out often enough to need a way back."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.sample_edits[0] = dict(app.sample_edits[0], source_bpm=120.0)
+        walked = []
+        for _ in range(3):
+            app.cycle_sample_tempo()
+            walked.append(app.sample_edits[0]["source_bpm"])
+        self.assertEqual(walked, [60.0, 240.0, 120.0])
+
+    def test_a_long_import_lands_as_a_region_on_one_pad(self):
         app = drum.DrumPadNative(settings_path=None)
         slot = app.selected_pad
         app.pad_layers[slot][0]["edit"]["source_bpm"] = 120.0
@@ -1036,8 +1127,11 @@ class MusicImportTests(unittest.TestCase):
         # Four bars at 120 bpm is 8 seconds of a 180 second file.
         self.assertAlmostEqual(edit["end"] * 180.0, 8.0, delta=0.1)
         self.assertEqual(edit["start"], 0.0)
-        self.assertTrue(app.chop_open)
-        self.assertIn("Chop", app.status)
+        # One region on one pad. Spreading it over a bank is a separate
+        # decision, so the import does not make it for you.
+        self.assertTrue(app.sample_editor_open)
+        self.assertFalse(app.chop_open)
+        self.assertEqual(app.main_tab, "Sampler")
 
     def test_the_region_is_capped_for_a_very_slow_tempo(self):
         app = drum.DrumPadNative(settings_path=None)
@@ -1302,6 +1396,24 @@ class MainScreenTests(unittest.TestCase):
         base = time.perf_counter_ns()
         return [base + index * spacing_ms * 1_000_000 for index in range(count)]
 
+    def test_quantize_grid_is_not_the_note_repeat_rate(self):
+        """Two labelled controls used to share one variable.
+
+        Changing the Feel grid silently retuned Note Repeat, and vice versa,
+        which is invisible until a repeat comes out at the wrong subdivision.
+        """
+        app = self.app
+        app.repeat_rate = "1/16"
+        app.quantize_grid = "1/16"
+        app.cycle_repeat_rate()
+        self.assertNotEqual(app.repeat_rate, "1/16")
+        self.assertEqual(app.quantize_grid, "1/16")
+
+    def test_settings_has_one_entry_point(self):
+        """The MIDI tab opened the same overlay as the gear."""
+        self.assertNotIn("MIDI", drum.MAIN_TABS)
+        self.assertFalse(self.app.select_tab("MIDI"))
+
     def test_full_level_pins_every_hit_to_127(self):
         app = self.app
         app.play_pad = mock.Mock()
@@ -1336,21 +1448,36 @@ class MainScreenTests(unittest.TestCase):
         app.handle_midi_release("N", 36)
         self.assertNotIn(("N", 36), app.held_triggers)
 
-    def test_the_value_control_drives_every_target(self):
+    def test_the_knob_is_the_master_volume(self):
         app = self.app
-        for target in drum.VALUE_TARGETS:
-            self.assertTrue(app.select_value_target(target))
-            before = app.value_spec()[1]
-            app.nudge_value(2)
-            self.assertNotEqual(app.value_spec()[1], before, target)
-        self.assertFalse(app.select_value_target("nonsense"))
+        app.volume = 0.5
+        app.nudge_value(2)
+        self.assertAlmostEqual(app.volume, 0.52)
+        app.nudge_value(-4)
+        self.assertAlmostEqual(app.volume, 0.48)
 
     def test_the_knob_pointer_stays_inside_its_sweep(self):
         app = self.app
-        for target in drum.VALUE_TARGETS:
-            app.value_target = target
-            self.assertGreaterEqual(app.value_fraction(), 0.0)
-            self.assertLessEqual(app.value_fraction(), 1.0)
+        for volume in (0.0, 0.37, 1.0):
+            app.volume = volume
+            self.assertAlmostEqual(app.value_fraction(), volume)
+        # The knob cannot be driven past either end of its travel.
+        app.volume = 1.0
+        app.nudge_value(50)
+        self.assertEqual(app.volume, 1.0)
+        app.volume = 0.0
+        app.nudge_value(-50)
+        self.assertEqual(app.volume, 0.0)
+
+    def test_swing_and_metronome_keep_their_own_controls(self):
+        """Both used to be editable only by pointing the knob at them."""
+        app = self.app
+        app.feel_swing = 50
+        app.nudge_swing(3)
+        self.assertEqual(app.feel_swing, 53)
+        app.metronome_level = 70
+        app.adjust_metronome_level(-5)
+        self.assertEqual(app.metronome_level, 65)
 
     def test_selecting_a_kit_slot_lands_on_it(self):
         app = self.app
@@ -1367,6 +1494,55 @@ class MainScreenTests(unittest.TestCase):
         self.assertFalse(app.loop_playing)
         app.handle_loop_command("STOP", time.perf_counter_ns())
         self.assertFalse(app.loop_playing)
+
+
+class SlotIndexingTests(unittest.TestCase):
+    """PADS holds the 16 physical pads; slots run 0-63 across four banks."""
+
+    def setUp(self):
+        self.app = drum.DrumPadNative(settings_path=None)
+
+    def test_pad_profile_survives_every_slot(self):
+        for slot in range(drum.PAD_SLOTS):
+            self.assertIn("name", drum.pad_profile(slot))
+            self.assertIn("color", drum.pad_profile(slot))
+
+    def test_a_swap_on_a_late_bank_names_both_pads(self):
+        app = self.app
+        app.select_bank(3)
+        first = app.selected_pad
+        self.assertGreaterEqual(first, 48)
+        app.pad_selection = {first}
+        self.assertTrue(app.swap_pads(first, first + 1))
+        self.assertIn("Swapped", app.status)
+
+    def test_a_hit_on_a_late_bank_survives_a_reload(self):
+        """Recorded hits carry a slot, and sanitising ran against 16."""
+        app = self.app
+        events = [(0.0, 40, 100), (1.0, 3, 90), (2.0, drum.PAD_SLOTS - 1, 80)]
+        self.assertEqual(app.sanitize_loop_events(events, 1), sorted(events))
+
+    def test_the_arrows_stay_inside_the_bank_on_screen(self):
+        app = self.app
+        app.select_bank(1)
+        with mock.patch.object(drum.pygame.key, "get_mods", return_value=0):
+            app.selected_pad = 16
+            app.handle_key(drum.pygame.K_RIGHT)
+            self.assertEqual(app.selected_pad, 17)
+            app.selected_pad = 16
+            app.handle_key(drum.pygame.K_LEFT)      # wraps within the bank, not out of it
+            self.assertEqual(app.selected_pad, 31)
+
+    def test_feel_marked_custom_survives_a_round_trip(self):
+        """"Custom" is a legal preset with no entry in FEEL_PRESETS."""
+        app = self.app
+        app.feel_preset = "Custom"
+        app.push_project_history()
+        app.feel_swing = 60
+        app.push_project_history()
+        app.undo_project_edit()
+        app.redo_project_edit()
+        self.assertEqual(app.feel_preset, "Custom")
 
 
 class KitBTests(unittest.TestCase):
@@ -2087,26 +2263,23 @@ class LooperTests(unittest.TestCase):
         self.assertFalse(self.app.loop_recording)
         self.assertEqual(self.app.loop_events, [(0.0, 2, 75)])
 
-    def test_quantize_uses_current_repeat_grid(self):
-        self.app.repeat_rate = "1/16"
+    def test_quantize_uses_the_quantize_grid(self):
+        self.app.quantize_grid = "1/16"
         self.app.loop_events = [(0.13, 0, 70), (0.39, 1, 80)]
         self.app.handle_loop_command("QUANTIZE")
         self.assertEqual(self.app.loop_events, [(0.25, 0, 70), (0.5, 1, 80)])
 
-    def test_natural_feel_is_non_destructive_and_reset_restores_exact_timing(self):
+    def test_quantize_keeps_the_unquantized_timing(self):
+        """Quantize edits a copy, so undo has something exact to go back to."""
         original = [(0.13, 0, 70), (0.39, 1, 80)]
         self.app.loop_events = list(original)
-        self.assertTrue(self.app.set_feel_preset("Natural", now_ns=1_000_000_000))
+        self.app.handle_loop_command("QUANTIZE", now_ns=1_000_000_000)
         self.assertEqual(self.app.loop_source_events, original)
-        self.assertAlmostEqual(self.app.loop_events[0][0], 0.19)
-        self.assertTrue(self.app.reset_loop_feel(now_ns=2_000_000_000))
-        self.assertEqual(self.app.loop_events, original)
-        self.assertIsNone(self.app.loop_source_events)
 
     def test_feel_changes_support_undo_and_redo(self):
         original = [(0.13, 0, 70)]
         self.app.loop_events = list(original)
-        self.app.set_feel_preset("Tight", now_ns=1_000_000_000)
+        self.app.handle_loop_command("QUANTIZE", now_ns=1_000_000_000)
         self.assertEqual(self.app.loop_events, [(0.25, 0, 70)])
         self.app.handle_loop_command("UNDO", now_ns=2_000_000_000)
         self.assertEqual(self.app.loop_events, original)
@@ -2509,10 +2682,33 @@ class SamplingTests(unittest.TestCase):
         self.assertTrue(all("deep" in candidate["label"].casefold() for candidate in app.sample_browser_candidates()))
         app.browser_query = ""
         app.browser_type = "All"
-        app.browser_kit = "Kit A"
-        kit_ids = {candidate["id"] for candidate in app.sample_browser_candidates()}
-        self.assertIn(f"synth:{app.kit_slots['A']['pad_synths'][0]}", kit_ids)
-        self.assertNotIn("synth:snare_deep", kit_ids)
+        app.browser_source = "User"
+        self.assertTrue(all(candidate["source"] == "User"
+                            for candidate in app.sample_browser_candidates()))
+
+    def test_a_sample_still_on_a_pad_is_never_called_unused(self):
+        """Sampling replaces the pad but keeps the file, so the sweep has to
+        judge by what can reach a file, not by what was overwritten."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[0] = "keep-me.wav"
+        self.assertIn("keep-me.wav", app.referenced_user_samples())
+
+    def test_a_sample_only_in_undo_history_is_still_referenced(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[0] = "older-take.wav"
+        app.push_project_history()
+        app.custom_sample_files[0] = "newer-take.wav"
+        referenced = app.referenced_user_samples()
+        # Undo has to be able to put the older one back.
+        self.assertIn("older-take.wav", referenced)
+        self.assertIn("newer-take.wav", referenced)
+
+    def test_snapshot_scan_finds_names_at_any_depth(self):
+        found = drum.DrumPadNative.snapshot_sample_names(
+            {"kits": {"A": {"pad_layers": [[{"file": "deep.wav"}]]}},
+             "favorites": ["file:starred.wav"], "bpm": 120}
+        )
+        self.assertEqual(found, {"deep.wav", "starred.wav"})
 
     def test_browser_preview_is_non_destructive_and_assignment_undoes(self):
         app = drum.DrumPadNative(settings_path=None)
