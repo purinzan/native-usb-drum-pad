@@ -1244,6 +1244,10 @@ def audio_input_devices():
 IMPORT_REGION_BARS = 4
 IMPORT_REGION_MAX_SECONDS = 20.0
 LONG_IMPORT_SECONDS = 25.0
+# The crop never collapses to nothing, and an edge is grabbable from a little
+# way off so it can be caught without pixel hunting.
+MIN_CROP_SPAN = 0.004
+CROP_HANDLE_GRAB = 0.02
 
 
 def decode_audio_file(path, rate=MIXER_FREQUENCY):
@@ -1652,6 +1656,9 @@ class DrumPadNative:
         self.chop_hover_marker = None
         self.audition_sound = None
         self.chop_wave_rect = None
+        self.crop_wave_rect = None
+        self.crop_drag_edge = None
+        self.crop_drag_anchor = 0.0
         self.browser_open = False
         self.browser_buttons = {}
         self.browser_query = ""
@@ -3373,11 +3380,13 @@ class DrumPadNative:
         edit["start"] = 0.0
         edit["end"] = max(0.02, min(1.0, region / length))
         self.edited_sound_cache.clear()
-        self.chop_open = True
-        self.chop_markers = []
+        # A long file lands as one region on one pad. Spreading it over the
+        # whole bank is a separate decision, so it waits behind the Chop button.
+        self.sample_editor_open = True
+        self.main_tab = "Sampler"
         self.status = (
-            f"{length:.0f}s imported - first {region:.1f}s selected, "
-            "Edit moves the region and Chop spreads it across the pads"
+            f"{length:.0f}s imported - first {region:.1f}s on this pad, "
+            "drag the waveform to move the region"
         )
         return True
 
@@ -3634,6 +3643,67 @@ class DrumPadNative:
             return False
         self.sample_edits[self.selected_pad] = sanitize_sample_edit(edit)
         self.edited_sound_cache.clear()
+        self.persist_settings_async()
+        return True
+
+    def set_sample_region(self, start, end):
+        """Put the crop somewhere outright, rather than nudging it there."""
+        if not self.custom_sample_files[self.selected_pad]:
+            return False
+        start = max(0.0, min(1.0, float(start)))
+        end = max(0.0, min(1.0, float(end)))
+        if end - start < MIN_CROP_SPAN:
+            end = min(1.0, start + MIN_CROP_SPAN)
+            start = max(0.0, end - MIN_CROP_SPAN)
+        edit = dict(self.sample_edits[self.selected_pad])
+        edit["start"], edit["end"] = start, end
+        self.sample_edits[self.selected_pad] = sanitize_sample_edit(edit)
+        self.edited_sound_cache.clear()
+        return True
+
+    def crop_wave_ratio(self, position):
+        rect = self.crop_wave_rect
+        if not rect or not rect.width:
+            return 0.0
+        return max(0.0, min(1.0, (position[0] - rect.left) / rect.width))
+
+    def begin_crop_drag(self, ratio):
+        """Grab whichever edge was aimed at, or sweep out a new region."""
+        if not self.custom_sample_files[self.selected_pad]:
+            return False
+        edit = self.sample_edits[self.selected_pad]
+        self.push_project_history()
+        if abs(ratio - edit["start"]) <= CROP_HANDLE_GRAB:
+            self.crop_drag_edge = "start"
+        elif abs(ratio - edit["end"]) <= CROP_HANDLE_GRAB:
+            self.crop_drag_edge = "end"
+        else:
+            self.crop_drag_edge = "new"
+            self.crop_drag_anchor = ratio
+            self.set_sample_region(ratio, ratio + MIN_CROP_SPAN)
+        return True
+
+    def update_crop_drag(self, ratio):
+        if self.crop_drag_edge is None:
+            return False
+        edit = self.sample_edits[self.selected_pad]
+        if self.crop_drag_edge == "start":
+            return self.set_sample_region(min(ratio, edit["end"] - MIN_CROP_SPAN), edit["end"])
+        if self.crop_drag_edge == "end":
+            return self.set_sample_region(edit["start"], max(ratio, edit["start"] + MIN_CROP_SPAN))
+        anchor = self.crop_drag_anchor
+        return self.set_sample_region(min(anchor, ratio), max(anchor, ratio))
+
+    def finish_crop_drag(self):
+        if self.crop_drag_edge is None:
+            return False
+        self.crop_drag_edge = None
+        edit = self.sample_edits[self.selected_pad]
+        samples = self.current_sample_array()
+        length = len(samples) / MIXER_FREQUENCY if samples is not None else 0.0
+        index = self.selected_pad
+        label = f"{PAD_BANKS[self.bank_of(index)]}{self.pad_of(index) + 1}"
+        self.sample_status = f"{length:.2f}s region on pad {label}"
         self.persist_settings_async()
         return True
 
@@ -4115,7 +4185,11 @@ class DrumPadNative:
                     if self.chop_press is not None and self.chop_wave_rect:
                         self.mouse_logical = self.window_to_logical(event.pos)
                         self.finish_chop_drag(self.chop_wave_ratio(self.mouse_logical))
+                    self.finish_crop_drag()
                     self.finish_pad_drag(self.window_to_logical(event.pos))
+                elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.crop_drag_edge is not None:
+                    self.mouse_logical = self.window_to_logical(event.pos)
+                    self.update_crop_drag(self.crop_wave_ratio(self.mouse_logical))
                 elif event.type == pygame.MOUSEMOTION and event.buttons[0] and self.chop_press is not None:
                     self.mouse_logical = self.window_to_logical(event.pos)
                     self.update_chop_drag(self.chop_wave_ratio(self.mouse_logical))
@@ -4399,6 +4473,8 @@ class DrumPadNative:
                 elif name == "sample_double": self.adjust_sample_source_bpm(2.0)
                 elif name == "sample_stretch": self.cycle_sample_stretch_mode()
                 return
+            if self.crop_wave_rect and self.crop_wave_rect.collidepoint(pos):
+                self.begin_crop_drag(self.crop_wave_ratio(pos))
             return
 
         if self.share_open:
@@ -8225,6 +8301,8 @@ class DrumPadNative:
         edit = self.sample_edits[self.selected_pad]
         wave_rect = pygame.Rect(274, 148, 492, 150)
         pygame.draw.rect(self.screen, theme.PANEL_2, wave_rect, border_radius=6)
+        # Zoom already shows only the region, so there is nothing to drag then.
+        self.crop_wave_rect = None if self.sample_wave_zoom else wave_rect
         peaks = self.sample_waveform_peaks(filename)
         if peaks:
             first = round(len(peaks) * edit["start"]) if self.sample_wave_zoom else 0
@@ -8240,9 +8318,27 @@ class DrumPadNative:
             pygame.draw.lines(self.screen, theme.SIGNAL, False, points_top, 2)
             pygame.draw.lines(self.screen, theme.SIGNAL, False, points_bottom, 2)
             if not self.sample_wave_zoom:
-                for ratio in (edit["start"], edit["end"]):
-                    x = wave_rect.left + round(ratio * wave_rect.width)
-                    pygame.draw.line(self.screen, theme.PANEL, (x, wave_rect.top + 4), (x, wave_rect.bottom - 4), 2)
+                left = wave_rect.left + round(edit["start"] * wave_rect.width)
+                right = wave_rect.left + round(edit["end"] * wave_rect.width)
+                shade = pygame.Surface((wave_rect.width, wave_rect.height), pygame.SRCALPHA)
+                shade.fill((16, 19, 21, 170))
+                self.screen.blit(shade, wave_rect, pygame.Rect(0, 0, left - wave_rect.left, wave_rect.height))
+                self.screen.blit(
+                    shade, (right, wave_rect.top),
+                    pygame.Rect(0, 0, wave_rect.right - right, wave_rect.height),
+                )
+                for x in (left, right):
+                    pygame.draw.line(self.screen, theme.ACCENT, (x, wave_rect.top + 2), (x, wave_rect.bottom - 2), 2)
+                    pygame.draw.rect(self.screen, theme.ACCENT, pygame.Rect(x - 4, wave_rect.top + 2, 8, 8))
+                    pygame.draw.rect(self.screen, theme.ACCENT, pygame.Rect(x - 4, wave_rect.bottom - 10, 8, 8))
+        self.screen.blit(
+            self.small_font.render(
+                "Drag to pick the region  \u00b7  drag an edge to move it"
+                if not self.sample_wave_zoom else "Zoomed to the region  \u00b7  Zoom off to drag it",
+                True, theme.INK_3,
+            ),
+            (274, wave_rect.bottom + 6),
+        )
 
         rows = (
             ("start", "Crop Start", f"{round(edit['start'] * 100)}%", 322, 0.01),

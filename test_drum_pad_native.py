@@ -1024,7 +1024,43 @@ class MusicImportTests(unittest.TestCase):
         self.assertFalse(app.frame_long_import(app.selected_pad))
         self.assertEqual(app.pad_layers[app.selected_pad][0]["edit"]["end"], 1.0)
 
-    def test_a_long_import_lands_as_a_region_and_opens_chop(self):
+    def test_dragging_the_waveform_picks_one_region(self):
+        """The ordinary case: sweep out a region, it plays on this pad."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.begin_crop_drag(0.25)
+        app.update_crop_drag(0.75)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.25)
+        self.assertAlmostEqual(edit["end"], 0.75)
+
+    def test_dragging_backwards_still_gives_a_forward_region(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.begin_crop_drag(0.8)
+        app.update_crop_drag(0.3)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.3)
+        self.assertAlmostEqual(edit["end"], 0.8)
+
+    def test_an_edge_near_the_pointer_is_grabbed_instead_of_starting_over(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.2, 0.6)
+        app.begin_crop_drag(0.61)          # within the grab radius of the end
+        app.update_crop_drag(0.9)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.2)
+        self.assertAlmostEqual(edit["end"], 0.9)
+
+    def test_a_region_never_collapses_to_nothing(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.5, 0.5)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertGreaterEqual(edit["end"] - edit["start"], drum.MIN_CROP_SPAN - 1e-9)
+
+    def test_a_long_import_lands_as_a_region_on_one_pad(self):
         app = drum.DrumPadNative(settings_path=None)
         slot = app.selected_pad
         app.pad_layers[slot][0]["edit"]["source_bpm"] = 120.0
@@ -1036,8 +1072,11 @@ class MusicImportTests(unittest.TestCase):
         # Four bars at 120 bpm is 8 seconds of a 180 second file.
         self.assertAlmostEqual(edit["end"] * 180.0, 8.0, delta=0.1)
         self.assertEqual(edit["start"], 0.0)
-        self.assertTrue(app.chop_open)
-        self.assertIn("Chop", app.status)
+        # One region on one pad. Spreading it over a bank is a separate
+        # decision, so the import does not make it for you.
+        self.assertTrue(app.sample_editor_open)
+        self.assertFalse(app.chop_open)
+        self.assertEqual(app.main_tab, "Sampler")
 
     def test_the_region_is_capped_for_a_very_slow_tempo(self):
         app = drum.DrumPadNative(settings_path=None)
