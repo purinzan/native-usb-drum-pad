@@ -1248,6 +1248,11 @@ LONG_IMPORT_SECONDS = 25.0
 # way off so it can be caught without pixel hunting.
 MIN_CROP_SPAN = 0.004
 CROP_HANDLE_GRAB = 0.02
+# Zoom frames the region with room either side, so the drag that picks a
+# region can still widen it once you are in close.
+CROP_ZOOM_MARGIN = 0.35
+# What the tempo readout walks through: as detected, half, double, and back.
+SAMPLE_TEMPO_STEPS = (1.0, 0.5, 2.0)
 
 
 def decode_audio_file(path, rate=MIXER_FREQUENCY):
@@ -1659,12 +1664,14 @@ class DrumPadNative:
         self.crop_wave_rect = None
         self.crop_drag_edge = None
         self.crop_drag_anchor = 0.0
+        self.crop_view_frozen = None
+        self.crop_focus_edge = "end"
+        self.sample_tempo_step = 0
         self.browser_open = False
         self.browser_buttons = {}
         self.browser_query = ""
         self.browser_type = "All"
         self.browser_source = "All"
-        self.browser_kit = "All Kits"
         self.browser_view = "All"
         self.browser_selected = None
         self.browser_page = 0
@@ -3516,12 +3523,6 @@ class DrumPadNative:
             candidates = [candidate for candidate in candidates if candidate["type"] == self.browser_type]
         if self.browser_source != "All":
             candidates = [candidate for candidate in candidates if candidate["source"] == self.browser_source]
-        if self.browser_kit != "All Kits":
-            slot = self.browser_kit.removeprefix("Kit ")
-            profile = self.kit_slots.get(slot, self.default_kit_profile())
-            allowed = {f"synth:{value}" for value in profile.get("pad_synths", [])}
-            allowed.update(f"file:{value}" for value in profile.get("custom_samples", []) if value)
-            candidates = [candidate for candidate in candidates if candidate["id"] in allowed]
         if self.browser_view == "Favorites":
             candidates = [candidate for candidate in candidates if candidate["id"] in self.sample_favorites]
         elif self.browser_view == "Recent":
@@ -3661,11 +3662,34 @@ class DrumPadNative:
         self.edited_sound_cache.clear()
         return True
 
+    def crop_view_window(self):
+        """The slice of the file the waveform shows, as fractions of the whole.
+
+        Zoomed, it is the region plus a margin either side; that margin is what
+        keeps dragging useful up close, since a window clamped to the region
+        could only ever shrink it.
+        """
+        if not self.sample_wave_zoom:
+            return 0.0, 1.0
+        if self.crop_view_frozen is not None:
+            # Held still during a drag: a window derived from the region would
+            # move as the region moved, and chase the pointer.
+            return self.crop_view_frozen
+        edit = self.sample_edits[self.selected_pad]
+        margin = max(MIN_CROP_SPAN, edit["end"] - edit["start"]) * CROP_ZOOM_MARGIN
+        low = max(0.0, edit["start"] - margin)
+        high = min(1.0, edit["end"] + margin)
+        if high - low < MIN_CROP_SPAN:
+            high = min(1.0, low + MIN_CROP_SPAN)
+        return low, high
+
     def crop_wave_ratio(self, position):
         rect = self.crop_wave_rect
         if not rect or not rect.width:
             return 0.0
-        return max(0.0, min(1.0, (position[0] - rect.left) / rect.width))
+        low, high = self.crop_view_window()
+        seen = max(0.0, min(1.0, (position[0] - rect.left) / rect.width))
+        return max(0.0, min(1.0, low + seen * (high - low)))
 
     def begin_crop_drag(self, ratio):
         """Grab whichever edge was aimed at, or sweep out a new region."""
@@ -3673,10 +3697,13 @@ class DrumPadNative:
             return False
         edit = self.sample_edits[self.selected_pad]
         self.push_project_history()
-        if abs(ratio - edit["start"]) <= CROP_HANDLE_GRAB:
-            self.crop_drag_edge = "start"
-        elif abs(ratio - edit["end"]) <= CROP_HANDLE_GRAB:
-            self.crop_drag_edge = "end"
+        self.crop_view_frozen = self.crop_view_window()
+        low, high = self.crop_view_frozen
+        grab = CROP_HANDLE_GRAB * (high - low)
+        if abs(ratio - edit["start"]) <= grab:
+            self.crop_drag_edge = self.crop_focus_edge = "start"
+        elif abs(ratio - edit["end"]) <= grab:
+            self.crop_drag_edge = self.crop_focus_edge = "end"
         else:
             self.crop_drag_edge = "new"
             self.crop_drag_anchor = ratio
@@ -3698,6 +3725,7 @@ class DrumPadNative:
         if self.crop_drag_edge is None:
             return False
         self.crop_drag_edge = None
+        self.crop_view_frozen = None
         edit = self.sample_edits[self.selected_pad]
         samples = self.current_sample_array()
         length = len(samples) / MIXER_FREQUENCY if samples is not None else 0.0
@@ -3779,6 +3807,23 @@ class DrumPadNative:
         self.edited_sound_cache.clear()
         self.persist_settings_async()
         return True
+
+    def cycle_sample_tempo(self):
+        """Detect the source tempo, then step it through half and double.
+
+        A detector that answers 96 for a 192 bpm loop is not wrong about the
+        pulse, only about which one you meant, so the fix belongs on the number.
+        """
+        edit = self.sample_edits[self.selected_pad]
+        if not edit.get("source_bpm"):
+            self.sample_tempo_step = 0
+            return self.detect_selected_sample_tempo()
+        # The steps are absolute against the detected tempo, so the walk always
+        # comes back to what the detector actually said.
+        previous = SAMPLE_TEMPO_STEPS[self.sample_tempo_step]
+        self.sample_tempo_step = (self.sample_tempo_step + 1) % len(SAMPLE_TEMPO_STEPS)
+        wanted = SAMPLE_TEMPO_STEPS[self.sample_tempo_step]
+        return self.adjust_sample_source_bpm(wanted / previous)
 
     def cycle_sample_stretch_mode(self):
         edit = self.sample_edits[self.selected_pad]
@@ -4389,9 +4434,6 @@ class DrumPadNative:
                 elif name == "browser_source":
                     values = ("All", "Built-in", "User")
                     self.browser_source = values[(values.index(self.browser_source) + 1) % len(values)]; self.browser_page = 0
-                elif name == "browser_kit":
-                    values = ("All Kits", "Kit A", "Kit B", "Kit C", "Kit D")
-                    self.browser_kit = values[(values.index(self.browser_kit) + 1) % len(values)]; self.browser_page = 0
                 elif name == "browser_view":
                     values = ("All", "Favorites", "Recent")
                     self.browser_view = values[(values.index(self.browser_view) + 1) % len(values)]; self.browser_page = 0
@@ -4447,10 +4489,8 @@ class DrumPadNative:
                 if name == "sample_editor_close":
                     self.sample_editor_open = False
                     self.sample_edit_bypass = False
-                elif name == "sample_start_down": self.adjust_sample_edit("start", -0.01)
-                elif name == "sample_start_up": self.adjust_sample_edit("start", 0.01)
-                elif name == "sample_end_down": self.adjust_sample_edit("end", -0.01)
-                elif name == "sample_end_up": self.adjust_sample_edit("end", 0.01)
+                elif name == "sample_crop_down": self.adjust_sample_edit(self.crop_focus_edge, -0.01)
+                elif name == "sample_crop_up": self.adjust_sample_edit(self.crop_focus_edge, 0.01)
                 elif name == "sample_tune_down": self.adjust_sample_edit("tune", -1)
                 elif name == "sample_tune_up": self.adjust_sample_edit("tune", 1)
                 elif name == "sample_attack_down": self.adjust_sample_edit("attack_ms", -5)
@@ -4464,13 +4504,10 @@ class DrumPadNative:
                 elif name == "sample_zoom": self.sample_wave_zoom = not self.sample_wave_zoom
                 elif name == "sample_preview": self.queue_pad(self.selected_pad, 100)
                 elif name == "sample_reset": self.reset_sample_edit()
-                elif name == "sample_undo": self.undo_project_edit()
                 elif name == "sample_chop":
                     self.chop_open = True
                     self.chop_markers = []
-                elif name == "sample_detect": self.detect_selected_sample_tempo()
-                elif name == "sample_half": self.adjust_sample_source_bpm(0.5)
-                elif name == "sample_double": self.adjust_sample_source_bpm(2.0)
+                elif name == "sample_detect": self.cycle_sample_tempo()
                 elif name == "sample_stretch": self.cycle_sample_stretch_mode()
                 return
             if self.crop_wave_rect and self.crop_wave_rect.collidepoint(pos):
@@ -8158,15 +8195,14 @@ class DrumPadNative:
         self.screen.blit(self.small_font.render(query[-34:], True, color), (656, 171))
 
         filters = (
-            ("browser_type", self.browser_type, 644, 83),
-            ("browser_source", self.browser_source, 735, 83),
-            ("browser_kit", self.browser_kit, 826, 83),
-            ("browser_view", self.browser_view, 917, 83),
+            ("browser_type", self.browser_type, 644, 114),
+            ("browser_source", self.browser_source, 766, 114),
+            ("browser_view", self.browser_view, 888, 112),
         )
         for name, label, x, width in filters:
             rect = pygame.Rect(x, 210, width, 34)
             self.browser_buttons[name] = rect
-            self.draw_button(rect, label, active=label not in ("All", "All Kits"))
+            self.draw_button(rect, label, active=label != "All")
 
         candidates = self.sample_browser_candidates()
         page_size = 6
@@ -8301,12 +8337,13 @@ class DrumPadNative:
         edit = self.sample_edits[self.selected_pad]
         wave_rect = pygame.Rect(274, 148, 492, 150)
         pygame.draw.rect(self.screen, theme.PANEL_2, wave_rect, border_radius=6)
-        # Zoom already shows only the region, so there is nothing to drag then.
-        self.crop_wave_rect = None if self.sample_wave_zoom else wave_rect
+        self.crop_wave_rect = wave_rect
+        low, high = self.crop_view_window()
+        span = max(MIN_CROP_SPAN, high - low)
         peaks = self.sample_waveform_peaks(filename)
         if peaks:
-            first = round(len(peaks) * edit["start"]) if self.sample_wave_zoom else 0
-            last = round(len(peaks) * edit["end"]) if self.sample_wave_zoom else len(peaks)
+            first = round(len(peaks) * low)
+            last = round(len(peaks) * high)
             visible = peaks[first:max(first + 1, last)]
             center = wave_rect.centery
             points_top, points_bottom = [], []
@@ -8317,35 +8354,41 @@ class DrumPadNative:
                 points_bottom.append((x, center + height))
             pygame.draw.lines(self.screen, theme.SIGNAL, False, points_top, 2)
             pygame.draw.lines(self.screen, theme.SIGNAL, False, points_bottom, 2)
-            if not self.sample_wave_zoom:
-                left = wave_rect.left + round(edit["start"] * wave_rect.width)
-                right = wave_rect.left + round(edit["end"] * wave_rect.width)
-                shade = pygame.Surface((wave_rect.width, wave_rect.height), pygame.SRCALPHA)
-                shade.fill((16, 19, 21, 170))
-                self.screen.blit(shade, wave_rect, pygame.Rect(0, 0, left - wave_rect.left, wave_rect.height))
-                self.screen.blit(
-                    shade, (right, wave_rect.top),
-                    pygame.Rect(0, 0, wave_rect.right - right, wave_rect.height),
-                )
-                for x in (left, right):
-                    pygame.draw.line(self.screen, theme.ACCENT, (x, wave_rect.top + 2), (x, wave_rect.bottom - 2), 2)
-                    pygame.draw.rect(self.screen, theme.ACCENT, pygame.Rect(x - 4, wave_rect.top + 2, 8, 8))
-                    pygame.draw.rect(self.screen, theme.ACCENT, pygame.Rect(x - 4, wave_rect.bottom - 10, 8, 8))
+            def screen_x(ratio):
+                seen = max(0.0, min(1.0, (ratio - low) / span))
+                return wave_rect.left + round(seen * wave_rect.width)
+
+            left, right = screen_x(edit["start"]), screen_x(edit["end"])
+            shade = pygame.Surface((wave_rect.width, wave_rect.height), pygame.SRCALPHA)
+            shade.fill((16, 19, 21, 170))
+            self.screen.blit(shade, wave_rect, pygame.Rect(0, 0, left - wave_rect.left, wave_rect.height))
+            self.screen.blit(
+                shade, (right, wave_rect.top),
+                pygame.Rect(0, 0, wave_rect.right - right, wave_rect.height),
+            )
+            for edge, x in (("start", left), ("end", right)):
+                lit = theme.ACCENT if edge == self.crop_focus_edge else theme.SIGNAL
+                pygame.draw.line(self.screen, lit, (x, wave_rect.top + 2), (x, wave_rect.bottom - 2), 2)
+                pygame.draw.rect(self.screen, lit, pygame.Rect(x - 4, wave_rect.top + 2, 8, 8))
+                pygame.draw.rect(self.screen, lit, pygame.Rect(x - 4, wave_rect.bottom - 10, 8, 8))
         self.screen.blit(
             self.small_font.render(
                 "Drag to pick the region  \u00b7  drag an edge to move it"
-                if not self.sample_wave_zoom else "Zoomed to the region  \u00b7  Zoom off to drag it",
+                + ("  \u00b7  zoomed" if self.sample_wave_zoom else ""),
                 True, theme.INK_3,
             ),
             (274, wave_rect.bottom + 6),
         )
 
+        # One pair of nudges, aimed at whichever edge was touched last. The
+        # waveform is how a region gets picked; this is only the fine end of it.
+        crop_label = "Crop Start" if self.crop_focus_edge == "start" else "Crop End"
         rows = (
-            ("start", "Crop Start", f"{round(edit['start'] * 100)}%", 322, 0.01),
-            ("end", "Crop End", f"{round(edit['end'] * 100)}%", 370, 0.01),
-            ("tune", "Tune", f"{edit['tune']:+d} st", 418, 1),
-            ("attack", "Attack", f"{edit['attack_ms']} ms", 466, 5),
-            ("release", "Release", f"{edit['release_ms']} ms", 514, 5),
+            ("crop", crop_label,
+             f"{round(edit['start'] * 100)}\u2013{round(edit['end'] * 100)}%", 322, 0.01),
+            ("tune", "Tune", f"{edit['tune']:+d} st", 370, 1),
+            ("attack", "Attack", f"{edit['attack_ms']} ms", 418, 5),
+            ("release", "Release", f"{edit['release_ms']} ms", 466, 5),
         )
         for field, label, value, y, _step in rows:
             self.screen.blit(self.small_font.render(label, True, theme.INK_2), (274, y + 9))
@@ -8365,28 +8408,31 @@ class DrumPadNative:
             ("sample_ab", "A/B", self.sample_edit_bypass),
         )
         for index, (name, label, active) in enumerate(option_data):
-            rect = pygame.Rect(274 + index * 123, 578, 112, 38)
+            rect = pygame.Rect(274 + index * 123, 530, 112, 38)
             self.sample_editor_buttons[name] = rect
             self.draw_button(rect, label, active=active)
-        bottom = (("sample_zoom", "Zoom", self.sample_wave_zoom), ("sample_undo", "Undo", False), ("sample_reset", "Reset", False), ("sample_chop", "Chop", False))
+        bottom = (
+            ("sample_zoom", "Zoom", self.sample_wave_zoom),
+            ("sample_reset", "Reset", False),
+            ("sample_chop", "Chop", False),
+        )
         for index, (name, label, active) in enumerate(bottom):
-            rect = pygame.Rect(274 + index * 123, 638, 112, 38)
+            rect = pygame.Rect(274 + index * 165, 590, 154, 38)
             self.sample_editor_buttons[name] = rect
-            self.draw_button(rect, label, active=active, enabled=name != "sample_undo" or bool(self.project_history))
+            self.draw_button(rect, label, active=active)
 
         bpm = edit.get("source_bpm")
+        # Detection lands an octave out often enough that halving and doubling
+        # belong on the number itself rather than on two buttons beside it.
         tempo_label = f"Fits {bpm:g} BPM" if bpm else "Detect Tempo"
         tempo_controls = (
-            ("sample_detect", tempo_label, bool(bpm), 274, 176),
-            ("sample_half", "1/2", False, 462, 62),
-            ("sample_double", "x2", False, 536, 62),
+            ("sample_detect", tempo_label, bool(bpm), 274, 320),
             ("sample_stretch", edit.get("stretch_mode", "Off"), edit.get("stretch_mode") != "Off", 610, 156),
         )
         for name, label, active, x, width in tempo_controls:
-            rect = pygame.Rect(x, 696, width, 38)
+            rect = pygame.Rect(x, 650, width, 38)
             self.sample_editor_buttons[name] = rect
-            enabled = name == "sample_detect" or bool(bpm)
-            self.draw_button(rect, label, active=active, enabled=enabled)
+            self.draw_button(rect, label, active=active, enabled=name == "sample_detect" or bool(bpm))
 
     def draw_share_overlay(self):
         shade = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)

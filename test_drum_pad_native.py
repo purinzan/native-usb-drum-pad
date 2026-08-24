@@ -1060,6 +1060,61 @@ class MusicImportTests(unittest.TestCase):
         edit = app.sample_edits[app.selected_pad]
         self.assertGreaterEqual(edit["end"] - edit["start"], drum.MIN_CROP_SPAN - 1e-9)
 
+    def test_zoom_still_allows_the_region_to_grow(self):
+        """Zoom used to switch the drag off, which made it a trap.
+
+        The window is the region plus a margin, so dragging up close can widen
+        the region as well as narrow it.
+        """
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.40, 0.55)
+        app.sample_wave_zoom = True
+        low, high = app.crop_view_window()
+        self.assertLess(low, 0.40)
+        self.assertGreater(high, 0.55)
+
+        app.begin_crop_drag(0.42)
+        app.update_crop_drag(high)
+        self.assertGreater(app.sample_edits[app.selected_pad]["end"], 0.55)
+
+    def test_the_zoom_window_holds_still_while_dragging(self):
+        """A window derived from the region would move as the region moved."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.40, 0.55)
+        app.sample_wave_zoom = True
+
+        app.begin_crop_drag(0.45)
+        frozen = app.crop_view_window()
+        app.update_crop_drag(0.50)
+        self.assertEqual(app.crop_view_window(), frozen)
+        app.finish_crop_drag()
+        self.assertNotEqual(app.crop_view_window(), frozen)
+
+    def test_one_pair_of_nudges_moves_the_edge_last_touched(self):
+        app = drum.DrumPadNative(settings_path=None)
+        app.custom_sample_files[app.selected_pad] = "anything.wav"
+        app.set_sample_region(0.30, 0.70)
+
+        app.begin_crop_drag(0.30)          # grabs the start
+        app.finish_crop_drag()
+        self.assertEqual(app.crop_focus_edge, "start")
+        app.adjust_sample_edit(app.crop_focus_edge, 0.05)
+        edit = app.sample_edits[app.selected_pad]
+        self.assertAlmostEqual(edit["start"], 0.35)
+        self.assertAlmostEqual(edit["end"], 0.70)
+
+    def test_the_tempo_readout_walks_the_octave_and_returns(self):
+        """Detection lands an octave out often enough to need a way back."""
+        app = drum.DrumPadNative(settings_path=None)
+        app.sample_edits[0] = dict(app.sample_edits[0], source_bpm=120.0)
+        walked = []
+        for _ in range(3):
+            app.cycle_sample_tempo()
+            walked.append(app.sample_edits[0]["source_bpm"])
+        self.assertEqual(walked, [60.0, 240.0, 120.0])
+
     def test_a_long_import_lands_as_a_region_on_one_pad(self):
         app = drum.DrumPadNative(settings_path=None)
         slot = app.selected_pad
@@ -2578,10 +2633,9 @@ class SamplingTests(unittest.TestCase):
         self.assertTrue(all("deep" in candidate["label"].casefold() for candidate in app.sample_browser_candidates()))
         app.browser_query = ""
         app.browser_type = "All"
-        app.browser_kit = "Kit A"
-        kit_ids = {candidate["id"] for candidate in app.sample_browser_candidates()}
-        self.assertIn(f"synth:{app.kit_slots['A']['pad_synths'][0]}", kit_ids)
-        self.assertNotIn("synth:snare_deep", kit_ids)
+        app.browser_source = "User"
+        self.assertTrue(all(candidate["source"] == "User"
+                            for candidate in app.sample_browser_candidates()))
 
     def test_browser_preview_is_non_destructive_and_assignment_undoes(self):
         app = drum.DrumPadNative(settings_path=None)
