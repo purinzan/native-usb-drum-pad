@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var midi = MIDIInput()
+    @StateObject private var looper = Looper()
     @State private var player = SamplePlayer()
 
     @State private var lit: [Int: Double] = [:]          // pad id -> energy
@@ -29,6 +30,8 @@ struct ContentView: View {
                 }
             }
             .frame(maxHeight: .infinity)
+            LoopBar(looper: looper)
+            transport
             floorControl
         }
         .padding(14)
@@ -107,6 +110,48 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var transport: some View {
+        HStack(spacing: 8) {
+            transportButton("Rec", tint: Palette.danger, on: looper.state == .recording) {
+                looper.toggleRecord()
+            }
+            transportButton("Play", tint: Palette.accent, on: looper.state == .playing) {
+                looper.togglePlay()
+            }
+            transportButton("\(looper.bars)B", tint: Palette.ink2, on: false) {
+                // 1, 2, 4 bars, the lengths the desktop offers.
+                looper.bars = looper.bars >= 4 ? 1 : looper.bars * 2
+            }
+            transportButton("Undo", tint: Palette.ink2, on: false, enabled: looper.canUndo) {
+                looper.undo()
+            }
+            transportButton("Clear", tint: Palette.ink2, on: false, enabled: !looper.events.isEmpty) {
+                looper.clear()
+            }
+        }
+    }
+
+    private func transportButton(
+        _ label: String, tint: Color, on: Bool, enabled: Bool = true, act: @escaping () -> Void
+    ) -> some View {
+        Button(action: act) {
+            Text(label)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(on ? Palette.onAccent : enabled ? Palette.ink : Palette.ink3)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 11)
+                .background(
+                    RoundedRectangle(cornerRadius: 7)
+                        .fill(on ? tint : Palette.panel)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 7)
+                        .strokeBorder(on ? tint : Palette.rule, lineWidth: 1)
+                )
+        }
+        .disabled(!enabled)
+    }
+
     private var floorControl: some View {
         HStack(spacing: 10) {
             Text("VELOCITY FLOOR").font(.system(size: 10, weight: .semibold)).kerning(1.4)
@@ -123,6 +168,12 @@ struct ContentView: View {
     private func begin() {
         loaded = player.preload(Kit.pads)
         player.start()
+        // The looper replays through the same path a finger takes, minus the
+        // recording, so a loop cannot record itself.
+        looper.onFire = { padID, velocity in
+            guard let pad = Kit.pads[safe: padID] else { return }
+            strike(pad, velocity: velocity, record: false)
+        }
         midi.onNote = { note, velocity in
             guard let pad = Kit.pad(forNote: note) else { return }
             strike(pad, velocity: Int(velocity))
@@ -130,9 +181,10 @@ struct ContentView: View {
         midi.start()
     }
 
-    private func strike(_ pad: Pad, velocity: Int) {
+    private func strike(_ pad: Pad, velocity: Int, record: Bool = true) {
         let expanded = Velocity.expand(velocity, floor: velocityFloor)
         player.play(pad, velocity: expanded)
+        if record { looper.capture(padID: pad.id, velocity: expanded) }
         selected = pad.id
         lastHit = pad.sound
         lastVelocity = expanded
