@@ -184,26 +184,15 @@ Feedback the panel gives you:
 
 ## iOS
 
-`ios/` holds a working vertical slice: sixteen pads, the CC0 kit, CoreMIDI input
-and AVAudioEngine playback, with the velocity curve, floor expansion and colour
-rules ported from the desktop app.
+The phone app lives in its own repository:
+[purinzan/starrypad-ios](https://github.com/purinzan/starrypad-ios). Only about
+7% of this codebase is platform-independent, so it is a Swift rewrite rather
+than a port, and keeping it here would have meant one repository with two
+build systems and two languages for two different products.
 
-```sh
-cd ios && xcodegen generate
-xcodebuild -project Starrypad.xcodeproj -scheme Starrypad -sdk iphonesimulator \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build
-```
-
-The project file and the staged samples are generated, so only `project.yml` and
-the Swift sources are committed. `Kit.swift` and `Theme.swift` are generated
-from `drum_pad_native.py` and `theme.py` so the two apps cannot drift.
-
-This is a rewrite rather than a port, and the reason is measurable: of 8,936
-lines, 667 are platform independent. The rest is pygame drawing and macOS
-audio and MIDI. On iOS the CoreAudio HAL does not exist, PortAudio has no
-backend, `subprocess` is forbidden so the ffmpeg import path cannot run, and
-`ctypes` cannot load system frameworks inside the sandbox. What is worth
-carrying over is the design: the decisions, the kit, and the numbers.
+What crossed over is the thinking rather than the code: the velocity curve, the
+floor expansion, the layer splits and the colour tokens all started here and are
+commented over there, so the two can be compared without being coupled.
 
 ## Not built yet
 
