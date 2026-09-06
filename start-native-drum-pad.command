@@ -14,4 +14,4 @@ if [ ! -x .venv/bin/python ]; then
   exit 1
 fi
 
-exec .venv/bin/python drum_pad_native.py
+exec .venv/bin/python starrypad_desktop.py
