@@ -1,0 +1,30 @@
+name: Desktop preview
+
+on:
+  push:
+    branches: [codex/pr2-desktop-preview]
+
+permissions:
+  contents: read
+
+jobs:
+  source-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-review-source
+          path: |
+            *.py
+            requirements*.txt
+            README.md
+            LICENSE*
+            docs/*.md
+            tools/*.py
+            .gitignore
+          include-hidden-files: true
+          retention-days: 1
