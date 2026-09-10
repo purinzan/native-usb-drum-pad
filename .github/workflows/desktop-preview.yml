@@ -1,0 +1,76 @@
+name: Desktop preview
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - '**.py'
+      - '**.spec'
+      - 'requirements*.txt'
+      - 'assets/**'
+      - 'samples/**'
+      - 'docs/DESKTOP-PREVIEW.md'
+      - '.github/workflows/desktop-preview.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: preview (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x64
+          - os: macos-latest
+            target: macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      SDL_AUDIODRIVER: dummy
+      SDL_VIDEODRIVER: dummy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-build.txt
+      - run: python -m pip install -r requirements-build.txt
+      - name: Syntax and complete regression suite
+        run: |
+          python -m compileall -q .
+          python -m unittest discover -v
+      - name: Build and test the relocated executable
+        run: python tools/build_preview.py
+      - name: Preview ZIP, checksum and smoke report (not a release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: STARRYPAD-preview-${{ matrix.target }}
+          path: dist/preview/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+      - name: Packaging diagnostic reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-diagnostics-${{ matrix.target }}
+          path: |
+            build/preview-reports/*
+            build/preview-metadata/BUILD-INFO.json
+            build/Starrypad/warn-*.txt
+          if-no-files-found: ignore
+          retention-days: 14
