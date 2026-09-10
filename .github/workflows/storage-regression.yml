@@ -2,15 +2,23 @@ name: Storage regression
 
 on:
   push:
-    branches: [codex/pr1-project-storage]
+    branches: [main]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: storage-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
       SDL_AUDIODRIVER: dummy
@@ -19,20 +27,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Source snapshot for regression review
-        uses: actions/upload-artifact@v4
-        with:
-          name: storage-review-source
-          path: |
-            *.py
-            requirements*.txt
-            README.md
-            .gitignore
-          include-hidden-files: true
-          retention-days: 1
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m unittest discover -v
+      - name: Syntax check
+        run: python -m compileall -q .
+      - name: Storage and application regressions (no physical devices)
+        run: python -m unittest discover -v
