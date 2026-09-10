@@ -20,3 +20,7 @@ Thumbs.db
 ios/build/
 ios/Starrypad.xcodeproj/
 ios/Starrypad/Resources/
+
+# Desktop preview build products
+/build/
+/dist/
