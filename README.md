@@ -303,3 +303,22 @@ The audio samples under `samples/` are **not** MIT licensed. They are derived
 from the [Salamander Drumkit](https://freepats.zenvoid.org/Drums/acoustic-drums-collection.html)
 by Alexander Holm, licensed under [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/),
 and remain under those terms. See [LICENSE-SAMPLES](LICENSE-SAMPLES) for details.
+
+
+## Project storage
+
+Writable settings, projects, recordings and exports now live in OS user-data
+folders rather than beside the program. Existing known `user-samples/`,
+`projects/`, `exports/` and settings are imported by **copy**, without deleting
+originals or replacing different existing files. Import failures are reported.
+See [storage behavior and validation](docs/STORAGE.md).
+
+Autosave snapshots are serialized by one worker. Explicit Save, New, Open and
+Share wait for the current project's save; a failed save is not reported as
+successful. Audio callbacks request saving without doing filesystem I/O.
+
+Collect and Project Bundle include **every layer in every kit**. A bundle uses
+`Project.starrypad.json` alongside `Project.samples/`; missing samples stop the
+export instead of being silently omitted. Save As also carries project-local
+samples to the new location, so an opened bundle does not depend on a global
+sample cache. Project JSON remains version 1 in this change.

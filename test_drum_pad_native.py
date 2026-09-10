@@ -15,6 +15,27 @@ import numpy
 import drum_pad_native as drum
 
 
+# Never let tests using settings_path=None write into a real user's library.
+_test_storage = None
+_test_path_patches = []
+
+
+def setUpModule():
+    global _test_storage
+    _test_storage = tempfile.TemporaryDirectory(prefix="starrypad-regression-")
+    for name, folder in (("USER_SAMPLE_DIR", "samples"), ("EXPORT_DIR", "exports")):
+        patch = mock.patch.object(drum, name, Path(_test_storage.name) / folder)
+        patch.start()
+        _test_path_patches.append(patch)
+
+
+def tearDownModule():
+    for patch in reversed(_test_path_patches):
+        patch.stop()
+    _test_path_patches.clear()
+    _test_storage.cleanup()
+
+
 def wav_attack_ms(path):
     with wave.open(str(path), "rb") as source:
         channels = source.getnchannels()
@@ -470,7 +491,7 @@ class ProjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             settings_path = Path(directory) / "settings.json"
             app = drum.DrumPadNative(settings_path=settings_path)
-            source = drum.USER_SAMPLE_DIR / "project-test-sample.wav"
+            source = app.user_sample_dir / "project-test-sample.wav"
             source.parent.mkdir(parents=True, exist_ok=True)
             source.write_bytes(b"sample")
             try:
@@ -2423,7 +2444,7 @@ class AudioExportTests(unittest.TestCase):
             self.assertIn("Bundle Test.starrypad.json", names)
             self.assertIn("Stems/00-Master.wav", names)
             self.assertIn("Stems/loop.mid", names)
-            self.assertIn("Samples/owned.wav", names)
+            self.assertIn("Bundle Test.samples/owned.wav", names)
 
 
 class SamplingTests(unittest.TestCase):
