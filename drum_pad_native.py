@@ -1,5 +1,7 @@
+import copy
 import math
 import os
+import weakref
 import random
 import shutil
 import collections
@@ -16,6 +18,9 @@ import time
 import wave
 import zipfile
 from pathlib import Path
+
+from app_paths import AppPaths
+import project_io
 
 import coreaudio
 import icons
@@ -43,10 +48,11 @@ import pygame
 ROOT = Path(__file__).resolve().parent
 SAMPLES_ROOT = ROOT / "samples"
 SAMPLE_DIR = SAMPLES_ROOT / "salamander-lowlatency" / "OH"
-SETTINGS_FILE = ROOT / "drum_pad_settings.json"
-EXPORT_DIR = ROOT / "exports"
-USER_SAMPLE_DIR = ROOT / "user-samples"
-PROJECT_DIR = ROOT / "projects"
+DEFAULT_PATHS = AppPaths.discover(ROOT)
+SETTINGS_FILE = DEFAULT_PATHS.settings_file
+EXPORT_DIR = DEFAULT_PATHS.exports
+USER_SAMPLE_DIR = DEFAULT_PATHS.samples
+PROJECT_DIR = DEFAULT_PATHS.projects
 PROJECT_EXTENSION = ".starrypad.json"
 GRAIN_FILE = ROOT / "assets" / "tex" / "grain-256.png"
 APP_ICON_FILE = ROOT / "assets" / "brand" / "icon-64.png"
@@ -1468,7 +1474,7 @@ class AudioSampler:
 
 
 class DrumPadNative:
-    def __init__(self, settings_path=SETTINGS_FILE):
+    def __init__(self, settings_path=SETTINGS_FILE, *, app_paths=None):
         self.screen = None
         self.clock = None
         self.grain = None
@@ -1555,9 +1561,22 @@ class DrumPadNative:
         self.status = "Starting"
         self.logs = []
         self.volume = 0.82
+        self.app_paths = app_paths
+        if app_paths is not None and settings_path == SETTINGS_FILE:
+            settings_path = app_paths.settings_file
         self.settings_path = Path(settings_path) if settings_path else None
+        self._storage_owner = threading.get_ident()
+        self._storage_dirty = threading.Event()
+        self._save_worker = None
+        self._save_finalizer = None
+        self._last_save_request_at = 0.0
+        self._saved_project_revision = 0
+        self._storage_revisions = {}
+        self._export_requests = queue.SimpleQueue()
         self.project_dir = (
-            PROJECT_DIR
+            app_paths.projects
+            if app_paths is not None and self.settings_path
+            else PROJECT_DIR
             if self.settings_path and self.settings_path.resolve() == SETTINGS_FILE.resolve()
             else self.settings_path.parent / "projects"
             if self.settings_path
@@ -1759,10 +1778,86 @@ class DrumPadNative:
         self.ignored_event_count = 0
         self.audio_error_count = 0
         self.max_queue_depth = 0
+        migration_error = None
+        paths = app_paths or DEFAULT_PATHS
+        if self.settings_path == paths.settings_file:
+            try:
+                project_io.migrate_legacy_data(paths.resource_root, paths)
+            except (OSError, ValueError, TypeError) as exc:
+                migration_error = f"Legacy import incomplete; originals kept: {exc}"
         self.load_settings()
         self.initialize_project()
+        if migration_error:
+            self.status = migration_error
+            self.log(migration_error)
         self.loop_schedule_bpm = self.bpm
         self.apply_mapping_mode()
+
+    @property
+    def user_sample_dir(self):
+        if self.app_paths is not None:
+            return self.app_paths.samples
+        if self.settings_path and self.settings_path != SETTINGS_FILE:
+            return self.settings_path.parent / "user-samples"
+        return USER_SAMPLE_DIR
+
+    @property
+    def export_dir(self):
+        if self.app_paths is not None:
+            return self.app_paths.exports
+        if self.settings_path and self.settings_path != SETTINGS_FILE:
+            return self.settings_path.parent / "exports"
+        return EXPORT_DIR
+
+    def _submit_storage(self):
+        # Only the state/UI owner takes snapshots; audio merely sets dirty.
+        self._storage_dirty.clear()
+        with self.loop_lock:
+            files = []
+            if self.project_initialized and self.project_path:
+                files.append((self.project_path, copy.deepcopy(self.project_payload())))
+            files.append((self.settings_path, copy.deepcopy(self.settings_payload())))
+        if self._save_worker is None:
+            self._save_worker = project_io.SaveWorker()
+            self._save_finalizer = weakref.finalize(self, self._save_worker.close)
+        key = self.project_path or self.settings_path
+        self._last_save_request_at = time.monotonic()
+        request = self._save_worker.submit(key, files)
+        self._storage_revisions[request.key] = request.revision
+        return request
+
+    def poll_storage(self):
+        if self.settings_path and self._storage_dirty.is_set():
+            if time.monotonic() - self._last_save_request_at >= 0.2:
+                self._submit_storage()
+        if self._save_worker is not None:
+            while True:
+                try:
+                    result = self._save_worker.results.get_nowait()
+                except queue.Empty:
+                    break
+                current_key = self.project_path or self.settings_path
+                is_current = (current_key and result.key == current_key.resolve()
+                              and result.revision == self._storage_revisions.get(result.key))
+                if result.error:
+                    message = f"Save failed ({result.key.name}): {result.error}"
+                    self.log(message)
+                    if is_current:
+                        self.status = message
+                elif is_current:
+                    self._saved_project_revision = max(self._saved_project_revision, result.revision)
+        while True:
+            try:
+                kind = self._export_requests.get_nowait()
+            except queue.Empty:
+                break
+            self.start_loop_export(kind)
+
+    def close_storage(self):
+        if self._save_worker is not None:
+            self._save_worker.close()
+            if self._save_finalizer is not None:
+                self._save_finalizer.detach()
 
     @staticmethod
     def factory_kit_profile(slot):
@@ -1825,6 +1920,7 @@ class DrumPadNative:
             value
             if isinstance(value, str)
             and Path(value).name == value
+            and not any(char in value for char in '/\\:\x00')
             and Path(value).suffix.lower() == ".wav"
             else None
             for value in custom_samples
@@ -1879,9 +1975,7 @@ class DrumPadNative:
 
     @staticmethod
     def write_text_atomic(path, text):
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, path)
+        project_io.write_text_atomic(path, text)
 
     def apply_settings_data(self, data):
         self.volume = max(0.0, min(1.0, float(data.get("volume", self.volume))))
@@ -2032,21 +2126,25 @@ class DrumPadNative:
 
     def persist_settings(self):
         if not self.settings_path:
-            return
+            return True
+        if threading.get_ident() != self._storage_owner:
+            self._storage_dirty.set()
+            return False  # Queued, not a completed save; never block the audio worker.
         try:
-            with self.settings_lock:
-                payload = json.dumps(self.settings_payload(), indent=2, ensure_ascii=True) + "\n"
-                self.write_text_atomic(self.settings_path, payload)
-                self.write_text_atomic(self.settings_backup_path(), payload)
-            self.persist_project()
-        except OSError as exc:
-            self.status = f"Settings save failed: {exc}"
+            request = self._submit_storage()
+            result = self._save_worker.wait(request)
+            if result.error:
+                raise OSError(result.error)
+            self._saved_project_revision = result.revision
+            return True
+        except (OSError, ValueError, TypeError, TimeoutError) as exc:
+            self.status = f"Save failed: {exc}"
             self.log(self.status)
+            return False
 
     def persist_settings_async(self):
-        if not self.settings_path:
-            return
-        threading.Thread(target=self.persist_settings, name="DrumSettingsSave", daemon=True).start()
+        if self.settings_path:
+            self._storage_dirty.set()
 
     def project_backup_path(self, path=None):
         target = Path(path or self.project_path) if path or self.project_path else None
@@ -2239,31 +2337,22 @@ class DrumPadNative:
                 continue
             try:
                 raw = candidate.read_text(encoding="utf-8")
-                self.apply_project_data(json.loads(raw))
-                self.project_path = target
+                with self.loop_lock:
+                    self.apply_project_data(json.loads(raw))
+                    self.project_path = target
                 if candidate != target:
                     self.write_text_atomic(target, raw)
                     self.status = "Recovered project autosave"
                 self.remember_project(target)
-                if update_settings:
-                    self.persist_settings()
+                if update_settings and not self.persist_settings():
+                    return False
                 return True
             except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
                 self.log(f"Project skipped: {exc}")
         return False
 
     def persist_project(self):
-        if not self.project_initialized or not self.project_path:
-            return
-        try:
-            with self.project_lock:
-                payload = json.dumps(self.project_payload(), indent=2, ensure_ascii=True) + "\n"
-                self.project_path.parent.mkdir(parents=True, exist_ok=True)
-                self.write_text_atomic(self.project_path, payload)
-                self.write_text_atomic(self.project_backup_path(), payload)
-        except OSError as exc:
-            self.status = f"Project save failed: {exc}"
-            self.log(self.status)
+        return self.persist_settings()
 
     def remember_project(self, path):
         value = str(Path(path).resolve())
@@ -2271,7 +2360,8 @@ class DrumPadNative:
         del self.recent_projects[8:]
 
     def project_snapshot(self):
-        return json.loads(json.dumps(self.project_payload()))
+        with self.loop_lock:
+            return copy.deepcopy(self.project_payload())
 
     def push_project_history(self):
         self.project_history.append(self.project_snapshot())
@@ -2340,8 +2430,8 @@ class DrumPadNative:
             return None
 
     def new_project(self):
-        if not self.project_dir:
-            return
+        if not self.project_dir or not self.persist_settings():
+            return False
         index = 1
         while True:
             name = "Untitled" if index == 1 else f"Untitled {index}"
@@ -2391,25 +2481,45 @@ class DrumPadNative:
         self.project_history.clear()
         self.project_redo.clear()
         self.remember_project(target)
-        self.persist_settings()
+        if not self.persist_settings():
+            return False
         self.status = "New project"
+        return True
 
     def save_project_as(self, path=None):
         target = Path(path) if path else self.choose_project_file(save=True)
-        if target is None:
+        if target is None or not self.persist_settings():
             return False
         if not str(target).lower().endswith(PROJECT_EXTENSION):
             target = Path(str(target) + PROJECT_EXTENSION)
+        # Resolve and collect while the OLD project still owns the references.
+        # In particular a project opened from a bundle may have no global copies.
+        try:
+            project = self.project_snapshot()
+            sources = {name: self.custom_sample_path(name)
+                       for name in project_io.referenced_samples(project)}
+            project_io.collect_samples(project, project_io.project_sample_dir(target), sources)
+        except (OSError, ValueError, KeyError) as exc:
+            self.status = f"Save As failed: {exc}"
+            self.log(self.status)
+            return False
+        previous = self.project_path, self.project_name, list(self.recent_projects)
         self.project_path = target
         self.project_name = target.name.removesuffix(PROJECT_EXTENSION)[:48]
         self.remember_project(target)
-        self.persist_settings()
+        if not self.persist_settings():
+            self.project_path, self.project_name, self.recent_projects = previous
+            return False
         self.status = "Project saved"
         return True
 
     def open_project(self, path=None):
         target = Path(path) if path else self.choose_project_file(save=False)
-        if target is None or not self.load_project(target):
+        if target is None:
+            return False
+        if not self.persist_settings():
+            return False
+        if not self.load_project(target):
             if target is not None:
                 self.status = "Project could not be opened"
             return False
@@ -2429,36 +2539,27 @@ class DrumPadNative:
         return True
 
     def project_sample_dir(self, path=None):
-        target = Path(path or self.project_path) if path or self.project_path else None
-        return target.parent / f"{target.name.removesuffix(PROJECT_EXTENSION)}.samples" if target else None
+        target = path or self.project_path
+        return project_io.project_sample_dir(target) if target else None
 
     def custom_sample_path(self, filename):
-        collected = self.project_sample_dir()
-        if collected:
-            candidate = collected / filename
-            if candidate.exists():
-                return candidate
-        return USER_SAMPLE_DIR / filename
+        return project_io.resolve_sample(filename, self.project_path, self.user_sample_dir)
 
     def collect_project_samples(self):
         target_dir = self.project_sample_dir()
         if target_dir is None:
             return False
-        referenced = {
-            filename
-            for profile in self.kit_slots.values()
-            for filename in profile.get("custom_samples", [])
-            if filename
-        }
-        target_dir.mkdir(parents=True, exist_ok=True)
-        copied = 0
-        for filename in referenced:
-            source = self.custom_sample_path(filename)
-            destination = target_dir / filename
-            if source.exists() and source.resolve() != destination.resolve():
-                shutil.copy2(source, destination)
-                copied += 1
-        self.persist_project()
+        try:
+            project = self.project_snapshot()
+            sources = {name: self.custom_sample_path(name)
+                       for name in project_io.referenced_samples(project)}
+            copied = project_io.collect_samples(project, target_dir, sources)
+            if not self.persist_project():
+                return False
+        except (OSError, ValueError, KeyError) as exc:
+            self.status = f"Collect failed: {exc}"
+            self.log(self.status)
+            return False
         self.status = f"Collected {copied} samples"
         return True
 
@@ -2794,6 +2895,7 @@ class DrumPadNative:
             if self.bounce_thread and self.bounce_thread.is_alive():
                 self.bounce_thread.join(timeout=10.0)
             self.persist_settings()
+            self.close_storage()
             self.wait_for_export()
             self.restore_hardware_buffer()
             pygame.quit()
@@ -3323,10 +3425,10 @@ class DrumPadNative:
     def process_sample_audio(self, audio, samplerate, target_pad):
         try:
             prepared = prepare_sample_audio(audio, samplerate)
-            USER_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+            self.user_sample_dir.mkdir(parents=True, exist_ok=True)
             timestamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
             filename = f"pad-{target_pad + 1:02d}-{timestamp}.wav"
-            path = USER_SAMPLE_DIR / filename
+            path = self.user_sample_dir / filename
             with wave.open(str(path), "wb") as wav_file:
                 wav_file.setnchannels(2)
                 wav_file.setsampwidth(2)
@@ -3414,7 +3516,7 @@ class DrumPadNative:
                 self.log(f"Sample failed: {value}")
                 continue
             try:
-                sound = pygame.mixer.Sound(str(USER_SAMPLE_DIR / value))
+                sound = pygame.mixer.Sound(str(self.user_sample_dir / value))
                 if self.sample_was_clipped:
                     self.pending_clipped_sample = (target_pad, value, sound)
                     self.clip_prompt_open = True
@@ -3459,7 +3561,7 @@ class DrumPadNative:
         if keep:
             self.accept_processed_sample(target_pad, filename, sound)
         else:
-            try: (USER_SAMPLE_DIR / filename).unlink(missing_ok=True)
+            try: (self.user_sample_dir / filename).unlink(missing_ok=True)
             except OSError: pass
             self.selected_pad = target_pad
             self.pad_selection = {target_pad}
@@ -3496,8 +3598,8 @@ class DrumPadNative:
             for filename in profile.get("custom_samples", [])
             if filename
         }
-        if USER_SAMPLE_DIR.exists():
-            referenced.update(path.name for path in USER_SAMPLE_DIR.glob("*.wav"))
+        if self.user_sample_dir.exists():
+            referenced.update(path.name for path in self.user_sample_dir.glob("*.wav"))
         for filename in sorted(referenced):
             candidates.append({
                 "id": f"file:{filename}", "label": Path(filename).stem[:34],
@@ -3606,9 +3708,9 @@ class DrumPadNative:
             if path.is_file() and path.name.casefold() in wanted and path.name.casefold() not in found:
                 found[path.name.casefold()] = path
                 if len(found) == len(wanted): break
-        USER_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+        self.user_sample_dir.mkdir(parents=True, exist_ok=True)
         for folded, source in found.items():
-            shutil.copy2(source, USER_SAMPLE_DIR / wanted[folded])
+            shutil.copy2(source, self.user_sample_dir / wanted[folded])
         self.load_custom_samples()
         self.persist_settings()
         self.sample_status = f"Relinked {len(found)} samples"
@@ -3876,12 +3978,12 @@ class DrumPadNative:
             )
             return False
         self.push_project_history()
-        USER_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+        self.user_sample_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
         choke_group = f"chop-{timestamp}" if self.chop_choke else None
         for slice_index, (target, audio) in enumerate(zip(targets, slices), 1):
             filename = f"chop-{target + 1:02d}-{slice_index:02d}-{timestamp}.wav"
-            path = USER_SAMPLE_DIR / filename
+            path = self.user_sample_dir / filename
             with wave.open(str(path), "wb") as wav_file:
                 wav_file.setnchannels(2)
                 wav_file.setsampwidth(2)
@@ -4142,6 +4244,7 @@ class DrumPadNative:
                 elif event.type == pygame.DROPFILE:
                     self.import_sample_file(event.file)
 
+            self.poll_storage()
             sample_detail = self.sampler.detail_snapshot()
             if sample_detail["active"]:
                 if sample_detail["clipped"]:
@@ -6373,6 +6476,7 @@ class DrumPadNative:
             }
 
     def loop_render_snapshot(self):
+        project = self.project_snapshot()
         return {
             "events": list(self.loop_events), "bars": self.loop_bars, "bpm": self.bpm,
             "pad_synths": list(self.pad_synths), "pad_sensitivity": list(self.pad_sensitivity),
@@ -6385,7 +6489,11 @@ class DrumPadNative:
             "solo_pads": list(self.solo_pads), "mixer_bypass": self.mixer_bypass,
             "perform_fx": dict(self.perform_fx), "perform_fx_bypass": self.perform_fx_bypass,
             "perform_fx_events": [list(event) for event in self.perform_fx_events],
-            "project": self.project_payload(), "project_name": self.project_name,
+            "project": project, "project_name": self.project_name,
+            "sample_paths": {name: self.custom_sample_path(name)
+                             for name in project_io.referenced_samples(project)},
+            "custom_sound_cache": dict(self.custom_sound_cache),
+            "builtin_samples": dict(self.samples),
         }
 
     def adjust_perform_fx(self, field, amount):
@@ -6439,9 +6547,9 @@ class DrumPadNative:
 
     def bounce_loop_worker(self, target, snapshot):
         try:
-            USER_SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
+            self.user_sample_dir.mkdir(parents=True, exist_ok=True)
             filename = f"bounce-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1_000_000:06d}.wav"
-            self.render_loop_wav(USER_SAMPLE_DIR / filename, snapshot)
+            self.render_loop_wav(self.user_sample_dir / filename, snapshot)
             self.bounce_results.put(("OK", target, filename))
         except Exception as exc:
             self.bounce_results.put(("ERROR", target, str(exc)))
@@ -6458,7 +6566,7 @@ class DrumPadNative:
                 self.log(f"Bounce failed: {value}")
                 continue
             try:
-                sound = pygame.mixer.Sound(str(USER_SAMPLE_DIR / value))
+                sound = pygame.mixer.Sound(str(self.user_sample_dir / value))
                 self.push_project_history()
                 self.custom_sample_files[target] = value
                 self.custom_sound_cache[value] = sound
@@ -6472,6 +6580,11 @@ class DrumPadNative:
                 self.log(f"Bounce load failed: {exc}")
 
     def start_loop_export(self, export_kind):
+        if threading.get_ident() != self._storage_owner:
+            self._export_requests.put(export_kind)
+            return
+        if not self.persist_settings():
+            return
         with self.loop_lock:
             if self.loop_exporting:
                 self.log("Export already running")
@@ -6497,19 +6610,19 @@ class DrumPadNative:
 
     def export_loop_worker(self, export_kind, snapshot):
         try:
-            EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+            self.export_dir.mkdir(parents=True, exist_ok=True)
             timestamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
             if export_kind == "MIDI":
-                path = EXPORT_DIR / f"drum-loop-{timestamp}.mid"
+                path = self.export_dir / f"drum-loop-{timestamp}.mid"
                 path.write_bytes(self.export_midi_bytes(snapshot))
             elif export_kind == "STEMS":
-                path = EXPORT_DIR / f"drum-stems-{timestamp}"
+                path = self.export_dir / f"drum-stems-{timestamp}"
                 self.export_stems(path, snapshot)
             elif export_kind == "BUNDLE":
-                path = EXPORT_DIR / f"{snapshot['project_name']}-{timestamp}.zip"
+                path = self.export_dir / f"{project_io.safe_project_name(snapshot['project_name'])}-{timestamp}.zip"
                 self.export_project_bundle(path, snapshot)
             else:
-                path = EXPORT_DIR / f"drum-loop-{timestamp}.wav"
+                path = self.export_dir / f"drum-loop-{timestamp}.wav"
                 self.render_loop_wav(path, snapshot)
 
             with self.loop_lock:
@@ -6557,31 +6670,17 @@ class DrumPadNative:
         )
 
     def export_project_bundle(self, path, snapshot):
-        with tempfile.TemporaryDirectory(prefix="starrypad-") as temporary:
-            root = Path(temporary)
-            stems = root / "Stems"
-            self.export_stems(stems, snapshot)
-            project_name = f"{snapshot['project_name']}{PROJECT_EXTENSION}"
-            (root / project_name).write_text(
-                json.dumps(snapshot["project"], indent=2, ensure_ascii=True) + "\n",
-                encoding="utf-8",
-            )
-            sample_names = {
-                name
-                for profile in snapshot["project"].get("kits", {}).values()
-                for name in profile.get("custom_samples", [])
-                if name
-            }
-            for name in sample_names:
-                source = self.custom_sample_path(name)
-                if source.exists():
-                    destination = root / "Samples" / Path(name).name
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, destination)
-            with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-                for item in sorted(root.rglob("*")):
-                    if item.is_file():
-                        archive.write(item, item.relative_to(root))
+        project = snapshot["project"]
+        sources = snapshot.get("sample_paths")
+        if sources is None:  # Also support callers supplying a standalone snapshot.
+            sources = {name: self.custom_sample_path(name)
+                       for name in project_io.referenced_samples(project)}
+        resource_root = self.app_paths.resource_root if self.app_paths else ROOT
+        project_io.bundle_project(
+            path, project, snapshot["project_name"], sources,
+            lambda directory: self.export_stems(directory, snapshot),
+            resource_root / "LICENSE-SAMPLES",
+        )
 
     def render_loop_wav(self, path, snapshot, pad_filter=None):
         import numpy
@@ -6621,7 +6720,11 @@ class DrumPadNative:
             curved = velocity_gain(adjusted_velocity)
             start_frame = round(beat * quarter_frames)
             custom_file = snapshot.get("custom_samples", [None] * len(PADS))[pad_index]
-            custom_sound = self.custom_sound_cache.get(custom_file) if custom_file else None
+            custom_cache = snapshot.get("custom_sound_cache", self.custom_sound_cache)
+            custom_sound = custom_cache.get(custom_file) if custom_file else None
+            if custom_file and custom_sound is None:
+                # Never silently render the built-in sound for a missing user sound.
+                raise FileNotFoundError(f"Custom sample is not loaded: {custom_file}")
             bypass = snapshot.get("mixer_bypass", False)
             pad_volume = 1.0 if bypass else snapshot.get("pad_volume", [1.0] * len(PADS))[pad_index]
             pan = 0.0 if bypass else snapshot.get("pad_pan", [0.0] * len(PADS))[pad_index]
@@ -6656,7 +6759,7 @@ class DrumPadNative:
             for layer_index, layer in enumerate(KIT.get(synth, [])):
                 files = layer_files_for_tier(layer, tier)
                 file = files[(event_index + layer_index) % len(files)]
-                sound = self.samples.get(file)
+                sound = snapshot.get("builtin_samples", self.samples).get(file)
                 if sound is None:
                     continue
                 samples = pygame.sndarray.array(sound).astype(numpy.float32)
