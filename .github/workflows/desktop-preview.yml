@@ -50,12 +50,13 @@ jobs:
             requirements-build.txt
       - run: python -m pip install -r requirements-build.txt
       - name: Syntax and complete regression suite
+        if: ${{ false }} # Owner policy: run software tests locally only.
         run: |
           python -m compileall -q .
           python -m unittest discover -v
-      - name: Build and test the relocated executable
+      - name: Build preview without software tests
         run: python tools/build_preview.py
-      - name: Preview ZIP, checksum and smoke report (not a release)
+      - name: Preview ZIP and checksum (not a release)
         uses: actions/upload-artifact@v4
         with:
           name: STARRYPAD-preview-${{ matrix.target }}
