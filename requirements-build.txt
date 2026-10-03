@@ -1,0 +1,3 @@
+-r requirements.txt
+# Build-only dependency; do not add to runtime requirements.txt.
+pyinstaller==6.22.2
