@@ -128,44 +128,47 @@ def build_preview(root=ROOT):
             subprocess.run(["/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(package), str(archive)], check=True)
         else:
             shutil.make_archive(str(archive.with_suffix("")), "zip", root_dir=dist, base_dir=package.name)
-        relocated = temporary / "relocated 日本語"  # Also exercise spaces and non-ASCII paths.
-        relocated.mkdir()
-        if sys.platform == "darwin":
-            subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(relocated)], check=True)
-            executable = relocated / "STARRYPAD.app" / "Contents" / "MacOS" / "STARRYPAD"
-        else:
-            with zipfile.ZipFile(archive) as zipped:
-                zipped.extractall(relocated)
-            executable = relocated / "STARRYPAD" / "STARRYPAD.exe"
-        before = inventory(relocated)
-        empty = temporary / "empty working directory"
-        empty.mkdir()
-        result = subprocess.run([str(executable), "--smoke-test", str(report_path)], cwd=empty,
-                                env=isolated_environment(), timeout=120, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace")
-        (reports / f"{name}-process.log").write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
-        if not report_path.exists():
-            raise RuntimeError(f"Packaged program produced no report (exit {result.returncode}); see {reports}")
-        report = json.loads(report_path.read_text(encoding="utf-8"))
-        verify_report(report, info["commit"])
-        if result.returncode != 0:
-            raise RuntimeError(f"Packaged program exited {result.returncode}")
-        if before != inventory(relocated):
-            raise RuntimeError("Packaged program wrote into its installed files")
-        report["relocated_package_unchanged"] = True
-        report["external_python_removed_from_path"] = True
-        report["empty_working_directory"] = True
-        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-        if sys.platform == "darwin":
-            subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(relocated / "STARRYPAD.app")], check=True)
-        # Do not publish a downloadable ZIP until the relocated executable passes.
+        # Preserve local smoke tests; the owner prohibits running them in Actions.
+        if os.environ.get("GITHUB_ACTIONS") != "true":
+            relocated = temporary / "relocated 日本語"  # Also exercise spaces and non-ASCII paths.
+            relocated.mkdir()
+            if sys.platform == "darwin":
+                subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(relocated)], check=True)
+                executable = relocated / "STARRYPAD.app" / "Contents" / "MacOS" / "STARRYPAD"
+            else:
+                with zipfile.ZipFile(archive) as zipped:
+                    zipped.extractall(relocated)
+                executable = relocated / "STARRYPAD" / "STARRYPAD.exe"
+            before = inventory(relocated)
+            empty = temporary / "empty working directory"
+            empty.mkdir()
+            result = subprocess.run([str(executable), "--smoke-test", str(report_path)], cwd=empty,
+                                    env=isolated_environment(), timeout=120, capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+            (reports / f"{name}-process.log").write_text(result.stdout + "\n" + result.stderr, encoding="utf-8")
+            if not report_path.exists():
+                raise RuntimeError(f"Packaged program produced no report (exit {result.returncode}); see {reports}")
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            verify_report(report, info["commit"])
+            if result.returncode != 0:
+                raise RuntimeError(f"Packaged program exited {result.returncode}")
+            if before != inventory(relocated):
+                raise RuntimeError("Packaged program wrote into its installed files")
+            report["relocated_package_unchanged"] = True
+            report["external_python_removed_from_path"] = True
+            report["empty_working_directory"] = True
+            report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            if sys.platform == "darwin":
+                subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(relocated / "STARRYPAD.app")], check=True)
+        # Actions packages without software tests; local packaging retains the smoke gate.
         output = dist / "preview"
         output.mkdir(parents=True, exist_ok=True)
         published = output / archive.name
         shutil.copy2(archive, published)
         (output / f"{name}.sha256").write_text(f"{digest(published)}  {published.name}\n", encoding="utf-8")
-        shutil.copy2(report_path, output / report_path.name)
-        print(f"Verified preview: {published}")
+        if os.environ.get("GITHUB_ACTIONS") != "true":
+            shutil.copy2(report_path, output / report_path.name)
+        print(f"Built preview: {published}")
 
 
 if __name__ == "__main__":
